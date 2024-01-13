@@ -1,6 +1,5 @@
-use crate::config::Mode;
-
 use super::{
+    super::Config,
     style::{
         ButtonStyle, ContainerStyle, Element, SvgStyle, LARGE_TEXT, LINE_HEIGHT, MEDIUM_TEXT,
         MIN_BUTTON_SIZE, PADDING, SPACING,
@@ -32,15 +31,21 @@ use game_number_edit::*;
 mod team_timeout_edit;
 use team_timeout_edit::*;
 
+mod foul_add;
+use foul_add::*;
+
+mod warning_add;
+use warning_add::*;
+
 pub(in super::super) fn build_keypad_page<'a>(
     snapshot: &GameSnapshot,
     page: KeypadPage,
     player_num: u16,
-    mode: Mode,
+    config: &Config,
     clock_running: bool,
 ) -> Element<'a, Message> {
     column![
-        make_game_time_button(snapshot, false, true, mode, clock_running),
+        make_game_time_button(snapshot, false, true, config.mode, clock_running),
         row![
             container(
                 column![
@@ -126,11 +131,15 @@ pub(in super::super) fn build_keypad_page<'a>(
             .padding(PADDING),
             match page {
                 KeypadPage::AddScore(color) => make_score_add_page(color),
-                KeypadPage::Penalty(origin, color, kind) => {
-                    make_penalty_edit_page(origin, color, kind, mode)
+                KeypadPage::Penalty(origin, color, kind, foul, expanded) => {
+                    make_penalty_edit_page(origin, color, kind, config, foul, expanded)
                 }
                 KeypadPage::GameNumber => make_game_number_edit_page(),
                 KeypadPage::TeamTimeouts(dur) => make_team_timeout_edit_page(dur),
+                KeypadPage::FoulAdd(color, foul, expanded) =>
+                    make_foul_add_page(color, foul, expanded),
+                KeypadPage::WarningAdd(color, foul, expanded) =>
+                    make_warning_add_page(color, foul, expanded),
             }
         ]
         .spacing(SPACING)

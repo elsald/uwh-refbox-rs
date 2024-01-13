@@ -1,7 +1,7 @@
 use crate::tournament_manager::penalty::PenaltyKind;
 use tokio::time::Duration;
 use uwh_common::{
-    game_snapshot::{Color as GameColor, GameSnapshot},
+    game_snapshot::{Color as GameColor, FoulKind, GameSnapshot},
     uwhscores::{GameInfo, TournamentInfo},
 };
 
@@ -37,6 +37,7 @@ pub enum Message {
         canceled: bool,
     },
     ChangeKind(PenaltyKind),
+    FoulSelectExpanded(bool),
     PenaltyEditComplete {
         canceled: bool,
         deleted: bool,
@@ -87,6 +88,7 @@ impl Message {
         match self {
             Self::NewSnapshot(_)
             | Self::ChangeTime { .. }
+            | Self::FoulSelectExpanded(_)
             | Self::ChangeScore { .. }
             | Self::Scroll { .. }
             | Self::KeypadButtonPress(_)
@@ -141,6 +143,8 @@ pub enum ConfigPage {
     Main,
     Tournament,
     Sound,
+    Display,
+    App,
     Remotes(usize, bool),
 }
 
@@ -175,6 +179,7 @@ pub enum BoolGameParameter {
     AutoSoundStopPlay,
     HideTime,
     ScorerCapNum,
+    FoulsAndWarnings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,15 +202,26 @@ pub enum ScrollOption {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeypadPage {
     AddScore(GameColor),
-    Penalty(Option<(GameColor, usize)>, GameColor, PenaltyKind),
+    Penalty(
+        Option<(GameColor, usize)>,
+        GameColor,
+        PenaltyKind,
+        FoulKind,
+        bool,
+    ),
     GameNumber,
     TeamTimeouts(Duration),
+    FoulAdd(Option<GameColor>, FoulKind, bool),
+    WarningAdd(Option<GameColor>, FoulKind, bool),
 }
 
 impl KeypadPage {
     pub fn max_val(&self) -> u16 {
         match self {
-            Self::AddScore(_) | Self::Penalty(_, _, _) => 99,
+            Self::AddScore(_)
+            | Self::Penalty(_, _, _, _, _)
+            | Self::FoulAdd(_, _, _)
+            | Self::WarningAdd(_, _, _) => 99,
             Self::GameNumber => 9999,
             Self::TeamTimeouts(_) => 999,
         }
@@ -213,7 +229,10 @@ impl KeypadPage {
 
     pub fn text(&self) -> &'static str {
         match self {
-            Self::AddScore(_) | Self::Penalty(_, _, _) => "PLAYER\nNUMBER:",
+            Self::AddScore(_)
+            | Self::Penalty(_, _, _, _, _)
+            | Self::FoulAdd(_, _, _)
+            | Self::WarningAdd(_, _, _) => "PLAYER\nNUMBER:",
             Self::GameNumber => "GAME\nNUMBER:",
             Self::TeamTimeouts(_) => "NUM T/Os\nPER HALF:",
         }

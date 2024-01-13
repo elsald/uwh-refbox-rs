@@ -10,6 +10,8 @@ use core::{cmp::min, time::Duration};
 use defmt::Format;
 use derivative::Derivative;
 use displaydoc::Display;
+use enum_derive_2018::EnumDisplay;
+use macro_attr_2018::macro_attr;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "std")]
 use time::Duration as SignedDuration;
@@ -43,6 +45,8 @@ pub struct GameSnapshot {
     pub w_score: u8,
     pub b_penalties: Vec<PenaltySnapshot>,
     pub w_penalties: Vec<PenaltySnapshot>,
+    pub b_warnings: Vec<WarningSnapshot>,
+    pub w_warnings: Vec<WarningSnapshot>,
     pub is_old_game: bool,
     pub game_number: u32,
     pub next_game_number: u32,
@@ -89,6 +93,13 @@ impl From<GameSnapshot> for GameSnapshotNoHeap {
 pub struct PenaltySnapshot {
     pub player_number: u8,
     pub time: PenaltyTime,
+    pub infraction: FoulKind,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct WarningSnapshot {
+    pub player_number: Option<u8>,
+    pub infraction: FoulKind,
 }
 
 #[derive(Derivative, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -326,6 +337,24 @@ impl PartialOrd for PenaltyTime {
     }
 }
 
+macro_attr! {
+    #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, EnumDisplay!)]
+    pub enum FoulKind {
+        Unknown,
+        StickInfringement,
+        IllegalAdvancement,
+        IllegalSubstitution,
+        IllegallyStoppingThePuck,
+        OutOfBounds,
+        GrabbingTheBarrier,
+        Obstruction,
+        DelayOfGame,
+        UnsportsmanlikeConduct,
+        FreeArm,
+        FalseStart,
+    }
+}
+
 #[cfg_attr(not(target_os = "windows"), derive(Format))]
 #[derive(Debug, Display, PartialEq, Eq, Clone)]
 pub enum EncodingError {
@@ -383,6 +412,7 @@ impl PenaltySnapshot {
                 0x01ff => PenaltyTime::TotalDismissal,
                 time => PenaltyTime::Seconds(time),
             },
+            infraction: FoulKind::Unknown,
         })
     }
 }
@@ -988,10 +1018,12 @@ mod test {
         state.b_penalties.push(PenaltySnapshot {
             player_number: 1,
             time: PenaltyTime::Seconds(48),
+            infraction: FoulKind::Unknown,
         });
         state.w_penalties.push(PenaltySnapshot {
             player_number: 12,
             time: PenaltyTime::Seconds(96),
+            infraction: FoulKind::Unknown,
         });
 
         test_state(&mut state)?;
@@ -1004,10 +1036,12 @@ mod test {
         state.b_penalties.push(PenaltySnapshot {
             player_number: 4,
             time: PenaltyTime::Seconds(245),
+            infraction: FoulKind::Unknown,
         });
         state.w_penalties.push(PenaltySnapshot {
             player_number: 14,
             time: PenaltyTime::Seconds(300),
+            infraction: FoulKind::Unknown,
         });
 
         test_state(&mut state)?;
@@ -1020,10 +1054,12 @@ mod test {
         state.b_penalties.push(PenaltySnapshot {
             player_number: 7,
             time: PenaltyTime::TotalDismissal,
+            infraction: FoulKind::Unknown,
         });
         state.w_penalties.push(PenaltySnapshot {
             player_number: 15,
             time: PenaltyTime::TotalDismissal,
+            infraction: FoulKind::Unknown,
         });
 
         test_state(&mut state)?;

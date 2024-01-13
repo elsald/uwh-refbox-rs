@@ -29,7 +29,7 @@ use tokio_serial::SerialPortBuilder;
 use uwh_common::{
     config::Game as GameConfig,
     drawing_support::*,
-    game_snapshot::{GamePeriod, GameSnapshot, TimeoutSnapshot},
+    game_snapshot::{FoulKind, GamePeriod, GameSnapshot, TimeoutSnapshot},
     uwhportal::UwhPortalClient,
     uwhscores::*,
 };
@@ -459,6 +459,43 @@ impl RefBoxApp {
             }
         }
     }
+
+    fn apply_settings_change(&mut self) {
+        let edited_settings = self.edited_settings.take().unwrap();
+
+        let EditableSettings {
+            white_on_right,
+            using_uwhscores,
+            current_tid,
+            current_pool,
+            games,
+            sound,
+            mode,
+            collect_scorer_cap_num,
+            hide_time,
+            config: _config,
+            game_number: _game_number,
+            track_fouls_and_warnings,
+        } = edited_settings;
+
+        self.config.hardware.white_on_right = white_on_right;
+        self.using_uwhscores = using_uwhscores;
+        self.current_tid = current_tid;
+        self.current_pool = current_pool;
+        self.games = games;
+        self.config.sound = sound;
+        self.sound.update_settings(self.config.sound.clone());
+        self.config.mode = mode;
+        self.config.collect_scorer_cap_num = collect_scorer_cap_num;
+        self.config.track_fouls_and_warnings = track_fouls_and_warnings;
+
+        if self.config.hide_time != hide_time {
+            self.config.hide_time = hide_time;
+            self.update_sender
+                .set_hide_time(self.config.hide_time)
+                .unwrap();
+        }
+    }
 }
 
 impl Drop for RefBoxApp {
@@ -830,7 +867,7 @@ impl Application for RefBoxApp {
                 trace!("AppState changed to {:?}", self.app_state);
             }
             Message::ChangeKind(new_kind) => {
-                if let AppState::KeypadPage(KeypadPage::Penalty(_, _, ref mut kind), _) =
+                if let AppState::KeypadPage(KeypadPage::Penalty(_, _, ref mut kind, _, _), _) =
                     self.app_state
                 {
                     *kind = new_kind;
@@ -839,10 +876,22 @@ impl Application for RefBoxApp {
                 }
                 trace!("AppState changed to {:?}", self.app_state);
             }
+            Message::FoulSelectExpanded(expanded) => {
+                match self.app_state {
+                    AppState::KeypadPage(KeypadPage::FoulAdd(_, _, ref mut old), _)
+                    | AppState::KeypadPage(KeypadPage::Penalty(_, _, _, _, ref mut old), _)
+                    | AppState::KeypadPage(KeypadPage::WarningAdd(_, _, ref mut old), _) => {
+                        info!("Foul select expanded set to: {expanded}");
+                        *old = expanded;
+                    }
+                    _ => unreachable!(),
+                }
+                trace!("AppState changed to {:?}", self.app_state);
+            }
             Message::PenaltyEditComplete { canceled, deleted } => {
                 if !canceled {
                     if let AppState::KeypadPage(
-                        KeypadPage::Penalty(origin, color, kind),
+                        KeypadPage::Penalty(origin, color, kind, foul, expanded),
                         player_num,
                     ) = self.app_state
                     {
@@ -871,8 +920,11 @@ impl Application for RefBoxApp {
             }
             Message::KeypadPage(page) => {
                 let init_val = match page {
-                    KeypadPage::AddScore(_) | KeypadPage::Penalty(None, _, _) => 0,
-                    KeypadPage::Penalty(Some((color, index)), _, _) => {
+                    KeypadPage::AddScore(_)
+                    | KeypadPage::Penalty(None, _, _, _, _)
+                    | KeypadPage::FoulAdd(_, _, _)
+                    | KeypadPage::WarningAdd(_, _, _) => 0,
+                    KeypadPage::Penalty(Some((color, index)), _, _, _, _) => {
                         self.pen_edit
                             .get_penalty(color, index)
                             .unwrap()
@@ -916,7 +968,7 @@ impl Application for RefBoxApp {
             Message::ChangeColor(new_color) => {
                 match self.app_state {
                     AppState::KeypadPage(KeypadPage::AddScore(ref mut color), _)
-                    | AppState::KeypadPage(KeypadPage::Penalty(_, ref mut color, _), _) => {
+                    | AppState::KeypadPage(KeypadPage::Penalty(_, ref mut color, _, _, _), _) => {
                         *color = new_color;
                     }
                     _ => {
@@ -978,6 +1030,7 @@ impl Application for RefBoxApp {
                     mode: self.config.mode,
                     hide_time: self.config.hide_time,
                     collect_scorer_cap_num: self.config.collect_scorer_cap_num,
+                    track_fouls_and_warnings: self.config.track_fouls_and_warnings,
                 };
 
                 self.edited_settings = Some(edited_settings);
@@ -1064,24 +1117,8 @@ impl Application for RefBoxApp {
                                 tm.clear_scheduled_game_start();
                             }
 
-                            let edited_settings = self.edited_settings.take().unwrap();
-                            self.config.hardware.white_on_right = edited_settings.white_on_right;
-                            self.using_uwhscores = edited_settings.using_uwhscores;
-                            self.current_tid = edited_settings.current_tid;
-                            self.current_pool = edited_settings.current_pool;
-                            self.games = edited_settings.games;
-                            self.config.sound = edited_settings.sound;
-                            self.sound.update_settings(self.config.sound.clone());
-                            self.config.mode = edited_settings.mode;
-                            self.config.collect_scorer_cap_num =
-                                edited_settings.collect_scorer_cap_num;
-
-                            if self.config.hide_time != edited_settings.hide_time {
-                                self.config.hide_time = edited_settings.hide_time;
-                                self.update_sender
-                                    .set_hide_time(self.config.hide_time)
-                                    .unwrap();
-                            }
+                            drop(tm);
+                            self.apply_settings_change();
 
                             confy::store(APP_NAME, None, &self.config).unwrap();
                             AppState::MainPage
@@ -1090,27 +1127,6 @@ impl Application for RefBoxApp {
                         if tm.current_period() != GamePeriod::BetweenGames {
                             AppState::ConfirmationPage(ConfirmationKind::GameNumberChanged)
                         } else {
-                            let edited_settings = self.edited_settings.take().unwrap();
-                            self.config.hardware.white_on_right = edited_settings.white_on_right;
-                            self.using_uwhscores = edited_settings.using_uwhscores;
-                            self.current_tid = edited_settings.current_tid;
-                            self.current_pool = edited_settings.current_pool;
-                            self.games = edited_settings.games;
-                            self.config.sound = edited_settings.sound;
-                            self.sound.update_settings(self.config.sound.clone());
-                            self.config.mode = edited_settings.mode;
-                            self.config.collect_scorer_cap_num =
-                                edited_settings.collect_scorer_cap_num;
-
-                            if self.config.hide_time != edited_settings.hide_time {
-                                self.config.hide_time = edited_settings.hide_time;
-                                self.update_sender
-                                    .set_hide_time(self.config.hide_time)
-                                    .unwrap();
-                            }
-
-                            confy::store(APP_NAME, None, &self.config).unwrap();
-
                             let next_game_info = if edited_settings.using_uwhscores {
                                 NextGameInfo {
                                     number: edited_settings.game_number,
@@ -1138,26 +1154,16 @@ impl Application for RefBoxApp {
                                 tm.apply_next_game_start(Instant::now()).unwrap();
                             }
 
+                            drop(tm);
+                            self.apply_settings_change();
+
+                            confy::store(APP_NAME, None, &self.config).unwrap();
+
                             AppState::MainPage
                         }
                     } else {
-                        let edited_settings = self.edited_settings.take().unwrap();
-                        self.config.hardware.white_on_right = edited_settings.white_on_right;
-                        self.using_uwhscores = edited_settings.using_uwhscores;
-                        self.current_tid = edited_settings.current_tid;
-                        self.current_pool = edited_settings.current_pool;
-                        self.games = edited_settings.games;
-                        self.config.sound = edited_settings.sound;
-                        self.sound.update_settings(self.config.sound.clone());
-                        self.config.mode = edited_settings.mode;
-                        self.config.collect_scorer_cap_num = edited_settings.collect_scorer_cap_num;
-
-                        if self.config.hide_time != edited_settings.hide_time {
-                            self.config.hide_time = edited_settings.hide_time;
-                            self.update_sender
-                                .set_hide_time(self.config.hide_time)
-                                .unwrap();
-                        }
+                        drop(tm);
+                        self.apply_settings_change();
 
                         confy::store(APP_NAME, None, &self.config).unwrap();
                         AppState::MainPage
@@ -1341,6 +1347,9 @@ impl Application for RefBoxApp {
                     BoolGameParameter::HideTime => edited_settings.hide_time ^= true,
                     BoolGameParameter::ScorerCapNum => {
                         edited_settings.collect_scorer_cap_num ^= true
+                    }
+                    BoolGameParameter::FoulsAndWarnings => {
+                        edited_settings.track_fouls_and_warnings ^= true
                     }
                 }
             }
@@ -1677,17 +1686,17 @@ impl Application for RefBoxApp {
                     None
                 };
 
-                let config = if let Some(ref c) = new_config {
+                let game_config = if let Some(ref c) = new_config {
                     c
                 } else {
                     &self.config.game
                 };
                 build_main_view(
                     &self.snapshot,
-                    config,
+                    game_config,
                     self.using_uwhscores,
                     &self.games,
-                    self.config.mode,
+                    &self.config,
                     clock_running,
                 )
             }
@@ -1719,7 +1728,7 @@ impl Application for RefBoxApp {
                 &self.snapshot,
                 page,
                 player_num,
-                self.config.mode,
+                &self.config,
                 clock_running,
             ),
             AppState::GameDetailsPage => build_game_info_page(

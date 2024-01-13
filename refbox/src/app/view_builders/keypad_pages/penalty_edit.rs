@@ -10,14 +10,16 @@ pub(super) fn make_penalty_edit_page<'a>(
     origin: Option<(GameColor, usize)>,
     color: GameColor,
     kind: PenaltyKind,
-    mode: Mode,
+    config: &Config,
+    foul: FoulKind,
+    expanded: bool,
 ) -> Element<'a, Message> {
     let (black_style, white_style) = match color {
         GameColor::Black => (ButtonStyle::BlackSelected, ButtonStyle::White),
         GameColor::White => (ButtonStyle::Black, ButtonStyle::WhiteSelected),
     };
 
-    let (green, yellow, orange) = match mode {
+    let (green, yellow, orange) = match config.mode {
         Mode::Hockey6V6 => (
             PenaltyKind::OneMinute,
             PenaltyKind::TwoMinute,
@@ -122,7 +124,6 @@ pub(super) fn make_penalty_edit_page<'a>(
     let orange_label = labels[2];
 
     column![
-        vertical_space(Length::Fill),
         row![
             make_button("BLACK")
                 .style(black_style)
@@ -132,23 +133,28 @@ pub(super) fn make_penalty_edit_page<'a>(
                 .on_press(Message::ChangeColor(GameColor::White)),
         ]
         .spacing(SPACING),
+        vertical_space(Length::Fixed(PADDING)),
+        row![make_penalty_dropdown(foul, expanded)].spacing(SPACING),
         vertical_space(Length::Fill),
-        row![
-            make_button(green_label)
-                .style(green_style)
-                .on_press(Message::ChangeKind(green)),
-            make_button(yellow_label)
-                .style(yellow_style)
-                .on_press(Message::ChangeKind(yellow)),
-            make_button(orange_label)
-                .style(orange_style)
-                .on_press(Message::ChangeKind(orange)),
-            make_button("TD")
-                .style(td_style)
-                .on_press(Message::ChangeKind(PenaltyKind::TotalDismissal)),
-        ]
-        .spacing(SPACING),
-        vertical_space(Length::Fill),
+        if !expanded {
+            row![
+                make_button(green_label)
+                    .style(green_style)
+                    .on_press(Message::ChangeKind(green)),
+                make_button(yellow_label)
+                    .style(yellow_style)
+                    .on_press(Message::ChangeKind(yellow)),
+                make_button(orange_label)
+                    .style(orange_style)
+                    .on_press(Message::ChangeKind(orange)),
+                make_button("TD")
+                    .style(td_style)
+                    .on_press(Message::ChangeKind(PenaltyKind::TotalDismissal)),
+            ]
+            .spacing(SPACING)
+        } else {
+            row![]
+        },
         exit_row,
     ]
     .spacing(SPACING)

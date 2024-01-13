@@ -1631,6 +1631,8 @@ impl TournamentManager {
             w_score: self.scores.white,
             b_penalties,
             w_penalties,
+            b_warnings: vec![],
+            w_warnings: vec![],
             is_old_game: !self.has_reset,
             game_number: self.game_number(),
             next_game_number: self.next_game_number(),

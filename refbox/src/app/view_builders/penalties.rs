@@ -58,6 +58,8 @@ pub(in super::super) fn build_penalty_overview_page<'a>(
                     None,
                     GameColor::Black,
                     default_pen_len,
+                    FoulKind::Unknown,
+                    false,
                 ))),
             make_button("DONE")
                 .style(ButtonStyle::Green)
@@ -119,6 +121,7 @@ fn make_penalty_list<'a>(
                         Some((color, i)),
                         color,
                         kind,
+                        false,
                     )))
                     .into()
             } else {
@@ -130,6 +133,8 @@ fn make_penalty_list<'a>(
                         None,
                         color,
                         default_pen_len,
+                        foul,
+                        false,
                     )))
                     .into()
             }

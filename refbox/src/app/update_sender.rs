@@ -621,7 +621,9 @@ mod test {
     use more_asserts::*;
     use std::io::ErrorKind;
     use tokio::io::AsyncReadExt;
-    use uwh_common::game_snapshot::{GamePeriod, PenaltySnapshot, PenaltyTime, TimeoutSnapshot};
+    use uwh_common::game_snapshot::{
+        FoulKind, GamePeriod, PenaltySnapshot, PenaltyTime, TimeoutSnapshot, WarningSnapshot,
+    };
 
     const BINARY_PORT: u16 = 12345;
     const JSON_PORT: u16 = 12346;
@@ -714,6 +716,26 @@ mod test {
                 PenaltySnapshot {
                     time: PenaltyTime::TotalDismissal,
                     player_number: 15,
+                },
+            ],
+            b_warnings: vec![
+                WarningSnapshot {
+                    infraction: FoulKind::Obstruction,
+                    player_number: Some(3),
+                },
+                WarningSnapshot {
+                    infraction: FoulKind::OutOfBounds,
+                    player_number: Some(6),
+                },
+            ],
+            w_warnings: vec![
+                WarningSnapshot {
+                    infraction: FoulKind::DelayOfGame,
+                    player_number: Some(12),
+                },
+                WarningSnapshot {
+                    infraction: FoulKind::StickInfringement,
+                    player_number: None,
                 },
             ],
             is_old_game: true,

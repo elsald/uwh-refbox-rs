@@ -172,6 +172,7 @@ pub enum ContainerStyle {
     Gray,
     Black,
     White,
+    Blue,
     ScrollBar,
     Disabled,
     Transparent,
@@ -186,6 +187,7 @@ impl container::StyleSheet for ApplicationTheme {
             ContainerStyle::Gray => cont_style(GRAY, BLACK),
             ContainerStyle::Black => cont_style(BLACK, WHITE),
             ContainerStyle::White => cont_style(WHITE, BLACK),
+            ContainerStyle::Blue => cont_style(BLUE, WHITE),
             ContainerStyle::ScrollBar => cont_style(WINDOW_BACKGROUND, BLACK),
             ContainerStyle::Disabled => container::Appearance {
                 text_color: Some(DISABLED_COLOR),

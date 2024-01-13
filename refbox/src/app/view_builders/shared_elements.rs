@@ -28,7 +28,8 @@ use uwh_common::{
     config::Game as GameConfig,
     drawing_support::*,
     game_snapshot::{
-        Color as GameColor, GamePeriod, GameSnapshot, PenaltySnapshot, PenaltyTime, TimeoutSnapshot,
+        Color as GameColor, FoulKind, GamePeriod, GameSnapshot, PenaltySnapshot, PenaltyTime,
+        TimeoutSnapshot, WarningSnapshot,
     },
     uwhscores::GameInfo,
 };
@@ -635,6 +636,7 @@ pub(super) fn config_string(
     config: &GameConfig,
     using_uwhscores: bool,
     games: &Option<BTreeMap<u32, GameInfo>>,
+    fouls_and_warnings: bool,
 ) -> String {
     const TEAM_NAME_LEN_LIMIT: usize = 40;
     let mut result = String::new();
@@ -735,15 +737,17 @@ pub(super) fn config_string(
 
     writeln!(&mut result, "Stop clock in last 2 minutes: ").unwrap();
 
-    write!(
-        &mut result,
-        "Cheif ref: \n\
-        Timer: \n\
-        Water ref 1: \n\
-        Water ref 2: \n\
-        Water ref 3: ",
-    )
-    .unwrap();
+    if !fouls_and_warnings {
+        write!(
+            &mut result,
+            "Cheif ref: \n\
+            Timer: \n\
+            Water ref 1: \n\
+            Water ref 2: \n\
+            Water ref 3: ",
+        )
+        .unwrap();
+    }
 
     result
 }
@@ -768,7 +772,7 @@ pub(super) fn make_multi_label_button<'a, Message: 'a + Clone, T: ToString>(
     .width(Length::Fill)
 }
 
-fn centered_text<'a, T: ToString>(label: T) -> Text<'a> {
+pub fn centered_text<'a, T: ToString>(label: T) -> Text<'a> {
     text(label)
         .line_height(LINE_HEIGHT)
         .vertical_alignment(Vertical::Center)
@@ -846,4 +850,97 @@ pub(super) fn make_value_button<'a, Message: 'a + Clone, T: ToString, U: ToStrin
         button = button.on_press(message);
     }
     button
+}
+
+pub(super) fn make_penalty_dropdown<'a>(foul: FoulKind, expanded: bool) -> Element<'a, Message> {
+    let closed_button_content = row![
+        text("INFRACTION")
+            .size(MEDIUM_TEXT)
+            .vertical_alignment(Vertical::Center)
+            .horizontal_alignment(Horizontal::Left)
+            .height(Length::Fill)
+            .line_height(LINE_HEIGHT),
+        horizontal_space(Length::Fill),
+        text(format!("{foul}"))
+            .size(MEDIUM_TEXT)
+            .vertical_alignment(Vertical::Center)
+            .horizontal_alignment(Horizontal::Right)
+            .height(Length::Fill)
+            .line_height(LINE_HEIGHT),
+        horizontal_space(Length::Fixed(SPACING)),
+        text("*")
+            .size(MEDIUM_TEXT)
+            .vertical_alignment(Vertical::Center)
+            .horizontal_alignment(Horizontal::Right)
+            .height(Length::Fill)
+            .line_height(LINE_HEIGHT),
+    ];
+
+    let foul_dropdown = button(closed_button_content)
+        .padding(PADDING)
+        .height(Length::Fixed(MIN_BUTTON_SIZE))
+        .width(Length::Fill)
+        .style(ButtonStyle::Blue);
+
+    if expanded {
+        let open_button_content = column![
+            foul_dropdown.on_press(Message::FoulSelectExpanded(false)),
+            row![
+                button(centered_text("UNKNOWN").size(SMALL_TEXT))
+                    .padding(0)
+                    .height(Length::Fixed(MIN_BUTTON_SIZE))
+                    .width(Length::Fill)
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("1")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("2")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("3")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("4")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("5")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+            ]
+            .spacing(SPACING),
+            vertical_space(Length::Fixed(SPACING)),
+            row![
+                make_button("UKNOWN")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("A")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("B")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("C")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("D")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+                make_button("E")
+                    .style(ButtonStyle::LightGray)
+                    .on_press(Message::NoAction),
+            ]
+            .spacing(SPACING),
+        ];
+
+        container(open_button_content)
+            .padding(PADDING)
+            .width(Length::Fill)
+            .style(ContainerStyle::Blue)
+            .into()
+    } else {
+        foul_dropdown
+            .on_press(Message::FoulSelectExpanded(true))
+            .into()
+    }
 }
