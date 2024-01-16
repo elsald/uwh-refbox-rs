@@ -891,7 +891,7 @@ impl Application for RefBoxApp {
             Message::PenaltyEditComplete { canceled, deleted } => {
                 if !canceled {
                     if let AppState::KeypadPage(
-                        KeypadPage::Penalty(origin, color, kind, foul, expanded),
+                        KeypadPage::Penalty(origin, color, kind, infraction, expanded),
                         player_num,
                     ) = self.app_state
                     {
@@ -905,10 +905,14 @@ impl Application for RefBoxApp {
                             let player_num = player_num.try_into().unwrap();
                             if let Some((old_color, index)) = origin {
                                 self.pen_edit
-                                    .edit_penalty(old_color, index, color, player_num, kind)
+                                    .edit_penalty(
+                                        old_color, index, color, player_num, kind, infraction,
+                                    )
                                     .unwrap();
                             } else {
-                                self.pen_edit.add_penalty(color, player_num, kind).unwrap();
+                                self.pen_edit
+                                    .add_penalty(color, player_num, kind, infraction)
+                                    .unwrap();
                             }
                         }
                     } else {

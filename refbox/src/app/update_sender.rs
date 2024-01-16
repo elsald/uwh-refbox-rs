@@ -702,20 +702,24 @@ mod test {
                 PenaltySnapshot {
                     time: PenaltyTime::Seconds(57),
                     player_number: 3,
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     time: PenaltyTime::Seconds(117),
                     player_number: 6,
+                    infraction: FoulKind::DelayOfGame,
                 },
             ],
             w_penalties: vec![
                 PenaltySnapshot {
                     time: PenaltyTime::Seconds(297),
                     player_number: 12,
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     time: PenaltyTime::TotalDismissal,
                     player_number: 15,
+                    infraction: FoulKind::FreeArm,
                 },
             ],
             b_warnings: vec![

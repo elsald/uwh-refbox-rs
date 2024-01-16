@@ -15,7 +15,7 @@ use tokio::{
 use uwh_common::{
     config::Game as GameConfig,
     drawing_support::*,
-    game_snapshot::{Color, GamePeriod, GameSnapshot, TimeoutSnapshot},
+    game_snapshot::{Color, FoulKind, GamePeriod, GameSnapshot, TimeoutSnapshot},
     uwhscores::TimingRules,
 };
 
@@ -582,6 +582,7 @@ impl TournamentManager {
         player_number: u8,
         kind: PenaltyKind,
         now: Instant,
+        infraction: FoulKind,
     ) -> Result<()> {
         info!(
             "{} Starting a {kind:?} penalty for {color} player #{player_number}",
@@ -597,6 +598,7 @@ impl TournamentManager {
             player_number,
             kind,
             start_instant: now,
+            infraction,
         };
         self.penalties[color].push(penalty);
         Ok(())
@@ -624,6 +626,7 @@ impl TournamentManager {
         new_color: Color,
         new_player_number: u8,
         new_kind: PenaltyKind,
+        new_infraction: FoulKind,
     ) -> Result<()> {
         let status_str = self.status_string(Instant::now());
         let penalty = self.penalties[old_color]
@@ -637,6 +640,7 @@ impl TournamentManager {
 
         penalty.player_number = new_player_number;
         penalty.kind = new_kind;
+        penalty.infraction = new_infraction;
         if old_color != new_color {
             let penalty = self.penalties[old_color].remove(index);
             self.penalties[new_color].push(penalty);
@@ -2107,6 +2111,7 @@ mod test {
             start_period: GamePeriod::SecondHalf,
             start_time: Duration::from_secs(234),
             start_instant: now,
+            infraction: FoulKind::Unknown,
         };
         let w_pen = Penalty {
             kind: PenaltyKind::TotalDismissal,
@@ -2114,6 +2119,7 @@ mod test {
             start_period: GamePeriod::FirstHalf,
             start_time: Duration::from_secs(413),
             start_instant: now,
+            infraction: FoulKind::Unknown,
         };
 
         // Test the internal automatic reset during the BetweenGame Period
@@ -3865,8 +3871,14 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, Duration::from_secs(25));
         tm.start_game_clock(start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, first_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            first_time,
+            FoulKind::StickInfringement,
+        )
+        .unwrap();
 
         let next_time = time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -3878,26 +3890,69 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: first_time,
+                infraction: FoulKind::StickInfringement,
             }]
         );
         assert_eq!(tm.penalties.white, vec![]);
 
         let time = next_time + Duration::from_secs(1);
         let next_time = time + Duration::from_secs(1);
-        tm.start_penalty(Color::Black, 3, PenaltyKind::TwoMinute, time)
-            .unwrap();
-        tm.start_penalty(Color::Black, 4, PenaltyKind::FiveMinute, time)
-            .unwrap();
-        tm.start_penalty(Color::Black, 5, PenaltyKind::TotalDismissal, time)
-            .unwrap();
-        tm.start_penalty(Color::White, 6, PenaltyKind::OneMinute, time)
-            .unwrap();
-        tm.start_penalty(Color::White, 7, PenaltyKind::TwoMinute, time)
-            .unwrap();
-        tm.start_penalty(Color::White, 8, PenaltyKind::FiveMinute, time)
-            .unwrap();
-        tm.start_penalty(Color::White, 9, PenaltyKind::TotalDismissal, time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            3,
+            PenaltyKind::TwoMinute,
+            time,
+            FoulKind::DelayOfGame,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            4,
+            PenaltyKind::FiveMinute,
+            time,
+            FoulKind::FalseStart,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            5,
+            PenaltyKind::TotalDismissal,
+            time,
+            FoulKind::FreeArm,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            6,
+            PenaltyKind::OneMinute,
+            time,
+            FoulKind::GrabbingTheBarrier,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            7,
+            PenaltyKind::TwoMinute,
+            time,
+            FoulKind::IllegalAdvancement,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            8,
+            PenaltyKind::FiveMinute,
+            time,
+            FoulKind::IllegalSubstitution,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            9,
+            PenaltyKind::TotalDismissal,
+            time,
+            FoulKind::IllegallyStoppingThePuck,
+        )
+        .unwrap();
 
         tm.update(next_time).unwrap();
         assert_eq!(
@@ -3909,6 +3964,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(24),
                     start_instant: first_time,
+                    infraction: FoulKind::StickInfringement,
                 },
                 Penalty {
                     kind: PenaltyKind::TwoMinute,
@@ -3916,6 +3972,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::DelayOfGame,
                 },
                 Penalty {
                     kind: PenaltyKind::FiveMinute,
@@ -3923,6 +3980,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::FalseStart,
                 },
                 Penalty {
                     kind: PenaltyKind::TotalDismissal,
@@ -3930,6 +3988,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::FreeArm,
                 },
             ]
         );
@@ -3942,6 +4001,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::GrabbingTheBarrier,
                 },
                 Penalty {
                     kind: PenaltyKind::TwoMinute,
@@ -3949,6 +4009,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::IllegalAdvancement,
                 },
                 Penalty {
                     kind: PenaltyKind::FiveMinute,
@@ -3956,6 +4017,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::IllegalSubstitution,
                 },
                 Penalty {
                     kind: PenaltyKind::TotalDismissal,
@@ -3963,6 +4025,7 @@ mod test {
                     start_period: GamePeriod::FirstHalf,
                     start_time: Duration::from_secs(22),
                     start_instant: time,
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
             ]
         );
@@ -3978,8 +4041,14 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, Duration::from_secs(25));
         tm.start_game_clock(start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            time,
+            FoulKind::StickInfringement,
+        )
+        .unwrap();
 
         let next_time = time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -3991,6 +4060,7 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: time,
+                infraction: FoulKind::StickInfringement,
             }],
         );
         assert_eq!(tm.penalties.white, vec![]);
@@ -4015,8 +4085,14 @@ mod test {
 
         let time = next_time + Duration::from_secs(1);
         let next_time = time + Duration::from_secs(1);
-        tm.start_penalty(Color::White, 3, PenaltyKind::OneMinute, time)
-            .unwrap();
+        tm.start_penalty(
+            Color::White,
+            3,
+            PenaltyKind::OneMinute,
+            time,
+            FoulKind::Obstruction,
+        )
+        .unwrap();
 
         tm.update(next_time).unwrap();
         assert_eq!(tm.penalties.black, vec![]);
@@ -4028,6 +4104,7 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(21),
                 start_instant: time,
+                infraction: FoulKind::Obstruction,
             }],
         );
 
@@ -4058,8 +4135,14 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, Duration::from_secs(25));
         tm.start_game_clock(start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, pen_start_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            pen_start_time,
+            FoulKind::OutOfBounds,
+        )
+        .unwrap();
 
         let next_time = pen_start_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4071,25 +4154,54 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::OutOfBounds,
             }],
         );
         assert_eq!(tm.penalties.white, vec![]);
 
         let next_time = next_time + Duration::from_secs(1);
         assert_eq!(
-            tm.edit_penalty(Color::Black, 1, Color::Black, 2, PenaltyKind::TwoMinute),
+            tm.edit_penalty(
+                Color::Black,
+                1,
+                Color::Black,
+                2,
+                PenaltyKind::TwoMinute,
+                FoulKind::IllegalAdvancement
+            ),
             Err(TournamentManagerError::InvalidIndex(Color::Black, 1))
         );
         assert_eq!(
-            tm.edit_penalty(Color::White, 0, Color::Black, 2, PenaltyKind::TwoMinute),
+            tm.edit_penalty(
+                Color::White,
+                0,
+                Color::Black,
+                2,
+                PenaltyKind::TwoMinute,
+                FoulKind::IllegalAdvancement
+            ),
             Err(TournamentManagerError::InvalidIndex(Color::White, 0))
         );
         assert_eq!(
-            tm.edit_penalty(Color::White, 1, Color::Black, 2, PenaltyKind::TwoMinute),
+            tm.edit_penalty(
+                Color::White,
+                1,
+                Color::Black,
+                2,
+                PenaltyKind::TwoMinute,
+                FoulKind::IllegalAdvancement
+            ),
             Err(TournamentManagerError::InvalidIndex(Color::White, 1))
         );
-        tm.edit_penalty(Color::Black, 0, Color::Black, 3, PenaltyKind::TwoMinute)
-            .unwrap();
+        tm.edit_penalty(
+            Color::Black,
+            0,
+            Color::Black,
+            3,
+            PenaltyKind::TwoMinute,
+            FoulKind::Unknown,
+        )
+        .unwrap();
         tm.update(next_time).unwrap();
         assert_eq!(
             tm.penalties.black,
@@ -4099,13 +4211,21 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
         assert_eq!(tm.penalties.white, vec![]);
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.edit_penalty(Color::Black, 0, Color::Black, 4, PenaltyKind::FiveMinute)
-            .unwrap();
+        tm.edit_penalty(
+            Color::Black,
+            0,
+            Color::Black,
+            4,
+            PenaltyKind::FiveMinute,
+            FoulKind::Unknown,
+        )
+        .unwrap();
         tm.update(next_time).unwrap();
         assert_eq!(
             tm.penalties.black,
@@ -4115,6 +4235,7 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
         assert_eq!(tm.penalties.white, vec![]);
@@ -4126,6 +4247,7 @@ mod test {
             Color::Black,
             5,
             PenaltyKind::TotalDismissal,
+            FoulKind::Unknown,
         )
         .unwrap();
         tm.update(next_time).unwrap();
@@ -4137,6 +4259,7 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
         assert_eq!(tm.penalties.white, vec![]);
@@ -4148,6 +4271,7 @@ mod test {
             Color::White,
             6,
             PenaltyKind::TotalDismissal,
+            FoulKind::Unknown,
         )
         .unwrap();
         tm.update(next_time).unwrap();
@@ -4160,24 +4284,53 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
 
         let next_time = next_time + Duration::from_secs(1);
         assert_eq!(
-            tm.edit_penalty(Color::White, 1, Color::White, 2, PenaltyKind::TwoMinute),
+            tm.edit_penalty(
+                Color::White,
+                1,
+                Color::White,
+                2,
+                PenaltyKind::TwoMinute,
+                FoulKind::Unknown
+            ),
             Err(TournamentManagerError::InvalidIndex(Color::White, 1))
         );
         assert_eq!(
-            tm.edit_penalty(Color::Black, 0, Color::Black, 2, PenaltyKind::TwoMinute),
+            tm.edit_penalty(
+                Color::Black,
+                0,
+                Color::Black,
+                2,
+                PenaltyKind::TwoMinute,
+                FoulKind::Unknown
+            ),
             Err(TournamentManagerError::InvalidIndex(Color::Black, 0))
         );
         assert_eq!(
-            tm.edit_penalty(Color::Black, 1, Color::Black, 2, PenaltyKind::TwoMinute),
+            tm.edit_penalty(
+                Color::Black,
+                1,
+                Color::Black,
+                2,
+                PenaltyKind::TwoMinute,
+                FoulKind::Unknown
+            ),
             Err(TournamentManagerError::InvalidIndex(Color::Black, 1))
         );
-        tm.edit_penalty(Color::White, 0, Color::White, 7, PenaltyKind::FiveMinute)
-            .unwrap();
+        tm.edit_penalty(
+            Color::White,
+            0,
+            Color::White,
+            7,
+            PenaltyKind::FiveMinute,
+            FoulKind::Unknown,
+        )
+        .unwrap();
         tm.update(next_time).unwrap();
         assert_eq!(tm.penalties.black, vec![]);
         assert_eq!(
@@ -4188,12 +4341,20 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.edit_penalty(Color::White, 0, Color::White, 8, PenaltyKind::TwoMinute)
-            .unwrap();
+        tm.edit_penalty(
+            Color::White,
+            0,
+            Color::White,
+            8,
+            PenaltyKind::TwoMinute,
+            FoulKind::Unknown,
+        )
+        .unwrap();
         tm.update(next_time).unwrap();
         assert_eq!(tm.penalties.black, vec![]);
         assert_eq!(
@@ -4204,12 +4365,20 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.edit_penalty(Color::White, 0, Color::White, 10, PenaltyKind::OneMinute)
-            .unwrap();
+        tm.edit_penalty(
+            Color::White,
+            0,
+            Color::White,
+            10,
+            PenaltyKind::OneMinute,
+            FoulKind::Unknown,
+        )
+        .unwrap();
         tm.update(next_time).unwrap();
         assert_eq!(tm.penalties.black, vec![]);
         assert_eq!(
@@ -4220,6 +4389,7 @@ mod test {
                 start_period: GamePeriod::FirstHalf,
                 start_time: Duration::from_secs(24),
                 start_instant: pen_start_time,
+                infraction: FoulKind::Unknown,
             }],
         );
     }
@@ -4240,8 +4410,14 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, Duration::from_secs(25));
         tm.start_game_clock(start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            next_time,
+            FoulKind::Unknown,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4250,14 +4426,21 @@ mod test {
             snapshot.b_penalties,
             vec![PenaltySnapshot {
                 player_number: 2,
-                time: PenaltyTime::Seconds(59)
+                time: PenaltyTime::Seconds(59),
+                infraction: FoulKind::Unknown,
             }]
         );
         assert_eq!(snapshot.w_penalties, vec![]);
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.start_penalty(Color::White, 3, PenaltyKind::OneMinute, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::White,
+            3,
+            PenaltyKind::OneMinute,
+            next_time,
+            FoulKind::UnsportsmanlikeConduct,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4266,22 +4449,36 @@ mod test {
             snapshot.b_penalties,
             vec![PenaltySnapshot {
                 player_number: 2,
-                time: PenaltyTime::Seconds(57)
+                time: PenaltyTime::Seconds(57),
+                infraction: FoulKind::Unknown,
             }]
         );
         assert_eq!(
             snapshot.w_penalties,
             vec![PenaltySnapshot {
                 player_number: 3,
-                time: PenaltyTime::Seconds(59)
+                time: PenaltyTime::Seconds(59),
+                infraction: FoulKind::UnsportsmanlikeConduct,
             }]
         );
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.start_penalty(Color::Black, 4, PenaltyKind::TwoMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::White, 5, PenaltyKind::TwoMinute, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            4,
+            PenaltyKind::TwoMinute,
+            next_time,
+            FoulKind::DelayOfGame,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            5,
+            PenaltyKind::TwoMinute,
+            next_time,
+            FoulKind::FalseStart,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4291,11 +4488,13 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(55)
+                    time: PenaltyTime::Seconds(55),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(119)
+                    time: PenaltyTime::Seconds(119),
+                    infraction: FoulKind::DelayOfGame,
                 },
             ]
         );
@@ -4304,20 +4503,34 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(57)
+                    time: PenaltyTime::Seconds(57),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(119)
+                    time: PenaltyTime::Seconds(119),
+                    infraction: FoulKind::FalseStart,
                 },
             ]
         );
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.start_penalty(Color::Black, 6, PenaltyKind::FiveMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::White, 7, PenaltyKind::FiveMinute, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            6,
+            PenaltyKind::FiveMinute,
+            next_time,
+            FoulKind::IllegalAdvancement,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            7,
+            PenaltyKind::FiveMinute,
+            next_time,
+            FoulKind::IllegallyStoppingThePuck,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4327,15 +4540,18 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(53)
+                    time: PenaltyTime::Seconds(53),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(117)
+                    time: PenaltyTime::Seconds(117),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::Seconds(299)
+                    time: PenaltyTime::Seconds(299),
+                    infraction: FoulKind::IllegalAdvancement,
                 },
             ]
         );
@@ -4344,24 +4560,39 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(55)
+                    time: PenaltyTime::Seconds(55),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(117)
+                    time: PenaltyTime::Seconds(117),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::Seconds(299)
+                    time: PenaltyTime::Seconds(299),
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
             ]
         );
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.start_penalty(Color::Black, 8, PenaltyKind::TotalDismissal, next_time)
-            .unwrap();
-        tm.start_penalty(Color::White, 9, PenaltyKind::TotalDismissal, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            8,
+            PenaltyKind::TotalDismissal,
+            next_time,
+            FoulKind::IllegalSubstitution,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            9,
+            PenaltyKind::TotalDismissal,
+            next_time,
+            FoulKind::Obstruction,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4371,19 +4602,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(51)
+                    time: PenaltyTime::Seconds(51),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(115)
+                    time: PenaltyTime::Seconds(115),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::Seconds(297)
+                    time: PenaltyTime::Seconds(297),
+                    infraction: FoulKind::IllegalAdvancement,
                 },
                 PenaltySnapshot {
                     player_number: 8,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalSubstitution,
                 },
             ]
         );
@@ -4392,19 +4627,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(53)
+                    time: PenaltyTime::Seconds(53),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(115)
+                    time: PenaltyTime::Seconds(115),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::Seconds(297)
+                    time: PenaltyTime::Seconds(297),
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
                 PenaltySnapshot {
                     player_number: 9,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::Obstruction,
                 },
             ]
         );
@@ -4418,19 +4657,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(36)
+                    time: PenaltyTime::Seconds(36),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(100)
+                    time: PenaltyTime::Seconds(100),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::Seconds(282)
+                    time: PenaltyTime::Seconds(282),
+                    infraction: FoulKind::IllegalAdvancement,
                 },
                 PenaltySnapshot {
                     player_number: 8,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalSubstitution,
                 },
             ]
         );
@@ -4439,19 +4682,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(38)
+                    time: PenaltyTime::Seconds(38),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(100)
+                    time: PenaltyTime::Seconds(100),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::Seconds(282)
+                    time: PenaltyTime::Seconds(282),
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
                 PenaltySnapshot {
                     player_number: 9,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::Obstruction,
                 },
             ]
         );
@@ -4465,19 +4712,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(26)
+                    time: PenaltyTime::Seconds(26),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(90)
+                    time: PenaltyTime::Seconds(90),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::Seconds(272)
+                    time: PenaltyTime::Seconds(272),
+                    infraction: FoulKind::IllegalAdvancement,
                 },
                 PenaltySnapshot {
                     player_number: 8,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalSubstitution,
                 },
             ]
         );
@@ -4486,19 +4737,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(28)
+                    time: PenaltyTime::Seconds(28),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(90)
+                    time: PenaltyTime::Seconds(90),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::Seconds(272)
+                    time: PenaltyTime::Seconds(272),
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
                 PenaltySnapshot {
                     player_number: 9,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::Obstruction,
                 },
             ]
         );
@@ -4512,19 +4767,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(60)
+                    time: PenaltyTime::Seconds(60),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::Seconds(242)
+                    time: PenaltyTime::Seconds(242),
+                    infraction: FoulKind::IllegalAdvancement,
                 },
                 PenaltySnapshot {
                     player_number: 8,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalSubstitution,
                 },
             ]
         );
@@ -4533,19 +4792,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(60)
+                    time: PenaltyTime::Seconds(60),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::Seconds(242)
+                    time: PenaltyTime::Seconds(242),
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
                 PenaltySnapshot {
                     player_number: 9,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::Obstruction,
                 },
             ]
         );
@@ -4559,19 +4822,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::IllegalAdvancement,
                 },
                 PenaltySnapshot {
                     player_number: 8,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalSubstitution,
                 },
             ]
         );
@@ -4580,19 +4847,23 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::UnsportsmanlikeConduct,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::IllegallyStoppingThePuck,
                 },
                 PenaltySnapshot {
                     player_number: 9,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::Obstruction,
                 },
             ]
         );
@@ -4615,8 +4886,14 @@ mod test {
         tm.scores.white = 5;
         tm.set_period_and_game_clock_time(GamePeriod::SecondHalf, Duration::from_secs(25));
         tm.start_game_clock(start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            next_time,
+            FoulKind::Unknown,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4625,16 +4902,29 @@ mod test {
             snapshot.b_penalties,
             vec![PenaltySnapshot {
                 player_number: 2,
-                time: PenaltyTime::Seconds(59)
+                time: PenaltyTime::Seconds(59),
+                infraction: FoulKind::Unknown,
             }]
         );
         assert_eq!(snapshot.w_penalties, vec![]);
 
         let next_time = next_time + Duration::from_secs(1);
-        tm.start_penalty(Color::White, 3, PenaltyKind::TwoMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::Black, 5, PenaltyKind::TotalDismissal, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::White,
+            3,
+            PenaltyKind::TwoMinute,
+            next_time,
+            FoulKind::DelayOfGame,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            5,
+            PenaltyKind::TotalDismissal,
+            next_time,
+            FoulKind::FalseStart,
+        )
+        .unwrap();
 
         let next_time = next_time + Duration::from_secs(1);
         tm.update(next_time).unwrap();
@@ -4644,11 +4934,13 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(57)
+                    time: PenaltyTime::Seconds(57),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 5,
                     time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::FalseStart,
                 }
             ]
         );
@@ -4656,7 +4948,8 @@ mod test {
             snapshot.w_penalties,
             vec![PenaltySnapshot {
                 player_number: 3,
-                time: PenaltyTime::Seconds(119)
+                time: PenaltyTime::Seconds(119),
+                infraction: FoulKind::DelayOfGame,
             }]
         );
 
@@ -4670,11 +4963,13 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::FalseStart,
                 },
             ]
         );
@@ -4682,7 +4977,8 @@ mod test {
             snapshot.w_penalties,
             vec![PenaltySnapshot {
                 player_number: 3,
-                time: PenaltyTime::Seconds(0)
+                time: PenaltyTime::Seconds(0),
+                infraction: FoulKind::DelayOfGame,
             },]
         );
     }
@@ -4704,15 +5000,22 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, Duration::from_secs(25));
         tm.start_game_clock(tm_start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, pen_start)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            pen_start,
+            FoulKind::Unknown,
+        )
+        .unwrap();
 
         let snapshot = tm.generate_snapshot(earlier_time).unwrap();
         assert_eq!(
             snapshot.b_penalties,
             vec![PenaltySnapshot {
                 player_number: 2,
-                time: PenaltyTime::Seconds(61)
+                time: PenaltyTime::Seconds(61),
+                infraction: FoulKind::Unknown,
             }]
         );
         assert_eq!(snapshot.w_penalties, vec![]);
@@ -4740,8 +5043,14 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, start_clock_time);
         tm.start_game_clock(tm_start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, pen_start)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            pen_start,
+            FoulKind::Unknown,
+        )
+        .unwrap();
 
         tm.stop_clock(clock_stop).unwrap(); // At this point the game clock reads 150s, the penalty has 50s left
         tm.set_game_clock_time(edited_clock_time).unwrap();
@@ -4753,7 +5062,8 @@ mod test {
             snapshot.b_penalties,
             vec![PenaltySnapshot {
                 player_number: 2,
-                time: PenaltyTime::Seconds(50)
+                time: PenaltyTime::Seconds(50),
+                infraction: FoulKind::Unknown,
             }]
         );
         assert_eq!(snapshot.w_penalties, vec![]);
@@ -4775,18 +5085,54 @@ mod test {
 
         tm.set_period_and_game_clock_time(GamePeriod::FirstHalf, Duration::from_secs(71));
         tm.start_game_clock(start);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::White, 3, PenaltyKind::OneMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::Black, 4, PenaltyKind::TwoMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::White, 5, PenaltyKind::TwoMinute, next_time)
-            .unwrap();
-        tm.start_penalty(Color::Black, 6, PenaltyKind::TotalDismissal, next_time)
-            .unwrap();
-        tm.start_penalty(Color::White, 7, PenaltyKind::TotalDismissal, next_time)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            next_time,
+            FoulKind::Unknown,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            3,
+            PenaltyKind::OneMinute,
+            next_time,
+            FoulKind::DelayOfGame,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            4,
+            PenaltyKind::TwoMinute,
+            next_time,
+            FoulKind::FalseStart,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            5,
+            PenaltyKind::TwoMinute,
+            next_time,
+            FoulKind::FreeArm,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            6,
+            PenaltyKind::TotalDismissal,
+            next_time,
+            FoulKind::GrabbingTheBarrier,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            7,
+            PenaltyKind::TotalDismissal,
+            next_time,
+            FoulKind::IllegalAdvancement,
+        )
+        .unwrap();
 
         // Check before culling
         let next_time = next_time + Duration::from_secs(1);
@@ -4797,15 +5143,18 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(59)
+                    time: PenaltyTime::Seconds(59),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(119)
+                    time: PenaltyTime::Seconds(119),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::GrabbingTheBarrier,
                 },
             ]
         );
@@ -4814,15 +5163,18 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(59)
+                    time: PenaltyTime::Seconds(59),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(119)
+                    time: PenaltyTime::Seconds(119),
+                    infraction: FoulKind::FreeArm,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalAdvancement,
                 },
             ]
         );
@@ -4836,15 +5188,18 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 2,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::Unknown,
                 },
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(50)
+                    time: PenaltyTime::Seconds(50),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::GrabbingTheBarrier,
                 },
             ]
         );
@@ -4853,15 +5208,18 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 3,
-                    time: PenaltyTime::Seconds(0)
+                    time: PenaltyTime::Seconds(0),
+                    infraction: FoulKind::DelayOfGame,
                 },
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(50)
+                    time: PenaltyTime::Seconds(50),
+                    infraction: FoulKind::FreeArm,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalAdvancement,
                 },
             ]
         );
@@ -4875,11 +5233,13 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 4,
-                    time: PenaltyTime::Seconds(44)
+                    time: PenaltyTime::Seconds(44),
+                    infraction: FoulKind::FalseStart,
                 },
                 PenaltySnapshot {
                     player_number: 6,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::GrabbingTheBarrier,
                 },
             ]
         );
@@ -4888,11 +5248,13 @@ mod test {
             vec![
                 PenaltySnapshot {
                     player_number: 5,
-                    time: PenaltyTime::Seconds(44)
+                    time: PenaltyTime::Seconds(44),
+                    infraction: FoulKind::FreeArm,
                 },
                 PenaltySnapshot {
                     player_number: 7,
-                    time: PenaltyTime::TotalDismissal
+                    time: PenaltyTime::TotalDismissal,
+                    infraction: FoulKind::IllegalAdvancement,
                 },
             ]
         );
@@ -4914,18 +5276,54 @@ mod test {
         tm.start_game_clock(now);
 
         let pen_start = now + Duration::from_secs(30);
-        tm.start_penalty(Color::Black, 2, PenaltyKind::OneMinute, pen_start)
-            .unwrap();
-        tm.start_penalty(Color::White, 3, PenaltyKind::OneMinute, pen_start)
-            .unwrap();
-        tm.start_penalty(Color::Black, 4, PenaltyKind::TwoMinute, pen_start)
-            .unwrap();
-        tm.start_penalty(Color::White, 5, PenaltyKind::TwoMinute, pen_start)
-            .unwrap();
-        tm.start_penalty(Color::Black, 6, PenaltyKind::TotalDismissal, pen_start)
-            .unwrap();
-        tm.start_penalty(Color::White, 7, PenaltyKind::TotalDismissal, pen_start)
-            .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            2,
+            PenaltyKind::OneMinute,
+            pen_start,
+            FoulKind::Unknown,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            3,
+            PenaltyKind::OneMinute,
+            pen_start,
+            FoulKind::DelayOfGame,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            4,
+            PenaltyKind::TwoMinute,
+            pen_start,
+            FoulKind::FalseStart,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            5,
+            PenaltyKind::TwoMinute,
+            pen_start,
+            FoulKind::FreeArm,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::Black,
+            6,
+            PenaltyKind::TotalDismissal,
+            pen_start,
+            FoulKind::GrabbingTheBarrier,
+        )
+        .unwrap();
+        tm.start_penalty(
+            Color::White,
+            7,
+            PenaltyKind::TotalDismissal,
+            pen_start,
+            FoulKind::IllegalAdvancement,
+        )
+        .unwrap();
 
         // Check while all penalties are still running, too many
         now += Duration::from_secs(60);

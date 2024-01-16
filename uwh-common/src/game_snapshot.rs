@@ -338,8 +338,10 @@ impl PartialOrd for PenaltyTime {
 }
 
 macro_attr! {
-    #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, EnumDisplay!)]
+    #[derive(Derivative, Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, EnumDisplay!)]
+    #[derivative(Default)]
     pub enum FoulKind {
+        #[derivative(Default)]
         Unknown,
         StickInfringement,
         IllegalAdvancement,

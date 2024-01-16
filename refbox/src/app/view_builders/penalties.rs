@@ -17,7 +17,7 @@ use uwh_common::game_snapshot::{Color as GameColor, GameSnapshot};
 
 pub(in super::super) fn build_penalty_overview_page<'a>(
     snapshot: &GameSnapshot,
-    penalties: BlackWhiteBundle<Vec<(String, FormatHint, PenaltyKind)>>,
+    penalties: BlackWhiteBundle<Vec<PrintablePenaltyDetails>>,
     indices: BlackWhiteBundle<usize>,
     mode: Mode,
     clock_running: bool,
@@ -74,7 +74,7 @@ pub(in super::super) fn build_penalty_overview_page<'a>(
 }
 
 fn make_penalty_list<'a>(
-    penalties: Vec<(String, FormatHint, PenaltyKind)>,
+    penalties: Vec<PrintablePenaltyDetails>,
     index: usize,
     color: GameColor,
     default_pen_len: PenaltyKind,
@@ -98,14 +98,14 @@ fn make_penalty_list<'a>(
         .chain([None].into_iter().cycle())
         .take(PENALTY_LIST_LEN)
         .map(|pen| {
-            if let Some((i, (pen_text, format, kind))) = pen {
-                let mut text = text(pen_text)
+            if let Some((i, details)) = pen {
+                let mut text = text(details.text)
                     .line_height(LINE_HEIGHT)
                     .vertical_alignment(Vertical::Center)
                     .horizontal_alignment(Horizontal::Left)
                     .width(Length::Fill);
 
-                match format {
+                match details.hint {
                     FormatHint::NoChange => {}
                     FormatHint::Edited => text = text.style(TextStyle::Orange),
                     FormatHint::Deleted => text = text.style(TextStyle::Red),
@@ -120,7 +120,8 @@ fn make_penalty_list<'a>(
                     .on_press(Message::KeypadPage(KeypadPage::Penalty(
                         Some((color, i)),
                         color,
-                        kind,
+                        details.kind,
+                        details.infraction,
                         false,
                     )))
                     .into()
@@ -133,7 +134,7 @@ fn make_penalty_list<'a>(
                         None,
                         color,
                         default_pen_len,
-                        foul,
+                        FoulKind::Unknown,
                         false,
                     )))
                     .into()

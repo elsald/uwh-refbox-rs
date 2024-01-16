@@ -36,7 +36,9 @@ impl TransmittedData {
 mod test {
     use super::*;
     use arrayvec::ArrayVec;
-    use uwh_common::game_snapshot::{GamePeriod, PenaltySnapshot, PenaltyTime, TimeoutSnapshot};
+    use uwh_common::game_snapshot::{
+        FoulKind, GamePeriod, PenaltySnapshot, PenaltyTime, TimeoutSnapshot,
+    };
 
     #[test]
     fn test_serialize_and_desereialize() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,10 +81,12 @@ mod test {
         data.snapshot.b_penalties.push(PenaltySnapshot {
             player_number: 1,
             time: PenaltyTime::Seconds(48),
+            infraction: FoulKind::Unknown,
         });
         data.snapshot.w_penalties.push(PenaltySnapshot {
             player_number: 12,
             time: PenaltyTime::Seconds(96),
+            infraction: FoulKind::DelayOfGame,
         });
 
         test_data(&mut data)?;
