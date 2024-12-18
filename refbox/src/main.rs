@@ -1,7 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use clap::Parser;
-use iced::{pure::Application, window::icon::Icon, Settings};
+use iced::{window::icon, Application, Settings};
+use iced_core::Font;
 use log::*;
 #[cfg(debug_assertions)]
 use log4rs::append::console::{ConsoleAppender, Target};
@@ -79,6 +80,10 @@ struct Cli {
     #[clap(long, short)]
     /// List all tournaments from uwhscores, including past ones
     all_tournaments: bool,
+
+    #[clap(long)]
+    /// Don't allow views that require a keyboard
+    touchscreen: bool,
 
     #[clap(long)]
     /// Directory within which log files will be placed, default is platform dependent
@@ -172,6 +177,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let log_config = log_config
         .logger(Logger::builder().build(APP_NAME, log_level)) // Setup the logging from the refbox app to use `log_level`
+        .logger(Logger::builder().build("uwh_common", log_level)) // Setup the logging from mio to use `LevelFilter::Warn`
         .build(root)
         .unwrap();
 
@@ -181,7 +187,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let spacing = args.spacing.unwrap_or(args.scale / 4.0);
 
     let icon =
-        Icon::from_rgba(Vec::from(app_icon::DATA), app_icon::WIDTH, app_icon::HEIGHT).unwrap();
+        icon::from_rgba(Vec::from(app_icon::DATA), app_icon::WIDTH, app_icon::HEIGHT).unwrap();
 
     if args.is_simulator {
         let flags = sim_app::SimRefBoxAppFlags {
@@ -260,16 +266,31 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         vec![]
     };
 
-    info!(
-        "Reading config file from {:?}",
-        confy::get_configuration_file_path(APP_NAME, None).unwrap()
-    );
+    let config_path = confy::get_configuration_file_path(APP_NAME, None).unwrap();
+    info!("Reading config file from {config_path:?}",);
 
     let mut config: Config = match confy::load(APP_NAME, None) {
         Ok(c) => c,
         Err(e) => {
-            warn!("Failed to read config file, overwriting with default. Error: {e}");
-            let config = Config::default();
+            warn!("Failed to use config file. Error: {e}");
+            let config = match std::fs::read_to_string(config_path) {
+                Ok(file) => {
+                    warn!("Found old config file, attempting migration");
+                    match toml::from_str(&file) {
+                        Ok(old_config) => Config::migrate(&old_config),
+                        Err(e) => {
+                            warn!("Failed to parse old config file. Error: {e}");
+                            warn!("Using default config");
+                            Config::default()
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read old config file. Error: {e}");
+                    warn!("Using default config");
+                    Config::default()
+                }
+            };
             confy::store(APP_NAME, None, &config).unwrap();
             config
         }
@@ -301,6 +322,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         require_https: !args.allow_http,
         fullscreen: args.fullscreen,
         list_all_tournaments: args.all_tournaments,
+        touchscreen: args.touchscreen,
     };
 
     let mut settings = Settings::with_flags(flags);
@@ -308,7 +330,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     settings.window.resizable = false;
     settings.window.icon = Some(icon);
     settings.default_text_size = app::style::SMALL_PLUS_TEXT;
-    settings.default_font = Some(include_bytes!("../resources/Roboto-Medium.ttf"));
+    settings.default_font = Font {
+        family: iced_core::font::Family::Name("Roboto"),
+        weight: iced_core::font::Weight::Medium,
+        stretch: iced_core::font::Stretch::Normal,
+        monospaced: false,
+    };
     info!("Starting UI");
     app::RefBoxApp::run(settings)?;
 

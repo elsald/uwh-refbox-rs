@@ -1,66 +1,92 @@
-use super::{
-    style::{self, SPACING},
-    *,
-};
-
+use super::{style::Element, *};
 use iced::{
-    pure::{column, row, vertical_space, Element},
+    widget::{column, row, vertical_space},
     Length,
 };
-
 use uwh_common::game_snapshot::Color as GameColor;
 
 pub(super) fn make_penalty_edit_page<'a>(
     origin: Option<(GameColor, usize)>,
     color: GameColor,
     kind: PenaltyKind,
+    config: &Config,
+    infraction: Infraction,
 ) -> Element<'a, Message> {
     let (black_style, white_style) = match color {
-        GameColor::Black => (style::Button::BlackSelected, style::Button::White),
-        GameColor::White => (style::Button::Black, style::Button::WhiteSelected),
+        GameColor::Black => (ButtonStyle::BlackSelected, ButtonStyle::White),
+        GameColor::White => (ButtonStyle::Black, ButtonStyle::WhiteSelected),
     };
 
-    let (one_min_style, two_min_style, five_min_style, td_style) = match kind {
-        PenaltyKind::OneMinute => (
-            style::Button::GreenSelected,
-            style::Button::Yellow,
-            style::Button::Orange,
-            style::Button::Red,
+    let (green, yellow, orange) = match config.mode {
+        Mode::Hockey6V6 => (
+            PenaltyKind::OneMinute,
+            PenaltyKind::TwoMinute,
+            PenaltyKind::FiveMinute,
         ),
-        PenaltyKind::TwoMinute => (
-            style::Button::Green,
-            style::Button::YellowSelected,
-            style::Button::Orange,
-            style::Button::Red,
+
+        Mode::Hockey3V3 => (
+            PenaltyKind::ThirtySecond,
+            PenaltyKind::OneMinute,
+            PenaltyKind::TwoMinute,
         ),
-        PenaltyKind::FiveMinute => (
-            style::Button::Green,
-            style::Button::Yellow,
-            style::Button::OrangeSelected,
-            style::Button::Red,
-        ),
-        PenaltyKind::TotalDismissal => (
-            style::Button::Green,
-            style::Button::Yellow,
-            style::Button::Orange,
-            style::Button::RedSelected,
+
+        Mode::Rugby => (
+            PenaltyKind::TwoMinute,
+            PenaltyKind::FourMinute,
+            PenaltyKind::FiveMinute,
         ),
     };
 
-    let mut exit_row = row().spacing(SPACING).push(
-        make_button("CANCEL")
-            .style(style::Button::Red)
-            .width(Length::Fill)
-            .on_press(Message::PenaltyEditComplete {
-                canceled: true,
-                deleted: false,
-            }),
-    );
+    let (green_style, yellow_style, orange_style, td_style) = if kind == green {
+        (
+            ButtonStyle::GreenSelected,
+            ButtonStyle::Yellow,
+            ButtonStyle::Orange,
+            ButtonStyle::Red,
+        )
+    } else if kind == yellow {
+        (
+            ButtonStyle::Green,
+            ButtonStyle::YellowSelected,
+            ButtonStyle::Orange,
+            ButtonStyle::Red,
+        )
+    } else if kind == orange {
+        (
+            ButtonStyle::Green,
+            ButtonStyle::Yellow,
+            ButtonStyle::OrangeSelected,
+            ButtonStyle::Red,
+        )
+    } else if kind == PenaltyKind::TotalDismissal {
+        (
+            ButtonStyle::Green,
+            ButtonStyle::Yellow,
+            ButtonStyle::Orange,
+            ButtonStyle::RedSelected,
+        )
+    } else {
+        (
+            ButtonStyle::Green,
+            ButtonStyle::Yellow,
+            ButtonStyle::Orange,
+            ButtonStyle::Red,
+        )
+    };
+
+    let mut exit_row = row![make_smaller_button("CANCEL")
+        .style(ButtonStyle::Red)
+        .width(Length::Fill)
+        .on_press(Message::PenaltyEditComplete {
+            canceled: true,
+            deleted: false,
+        }),]
+    .spacing(SPACING);
 
     if origin.is_some() {
         exit_row = exit_row.push(
-            make_button("DELETE")
-                .style(style::Button::Orange)
+            make_smaller_button("DELETE")
+                .style(ButtonStyle::Orange)
                 .width(Length::Fill)
                 .on_press(Message::PenaltyEditComplete {
                     canceled: false,
@@ -70,8 +96,8 @@ pub(super) fn make_penalty_edit_page<'a>(
     }
 
     exit_row = exit_row.push(
-        make_button("DONE")
-            .style(style::Button::Green)
+        make_smaller_button("DONE")
+            .style(ButtonStyle::Green)
             .width(Length::Fill)
             .on_press(Message::PenaltyEditComplete {
                 canceled: false,
@@ -79,49 +105,61 @@ pub(super) fn make_penalty_edit_page<'a>(
             }),
     );
 
-    column()
-        .spacing(SPACING)
-        .push(vertical_space(Length::Fill))
-        .push(
-            row()
-                .spacing(SPACING)
-                .push(
-                    make_button("BLACK")
-                        .style(black_style)
-                        .on_press(Message::ChangeColor(GameColor::Black)),
-                )
-                .push(
-                    make_button("WHITE")
-                        .style(white_style)
-                        .on_press(Message::ChangeColor(GameColor::White)),
-                ),
-        )
-        .push(vertical_space(Length::Fill))
-        .push(
-            row()
-                .spacing(SPACING)
-                .push(
-                    make_button("1m")
-                        .style(one_min_style)
-                        .on_press(Message::ChangeKind(PenaltyKind::OneMinute)),
-                )
-                .push(
-                    make_button("2m")
-                        .style(two_min_style)
-                        .on_press(Message::ChangeKind(PenaltyKind::TwoMinute)),
-                )
-                .push(
-                    make_button("5m")
-                        .style(five_min_style)
-                        .on_press(Message::ChangeKind(PenaltyKind::FiveMinute)),
-                )
-                .push(
-                    make_button("TD")
-                        .style(td_style)
-                        .on_press(Message::ChangeKind(PenaltyKind::TotalDismissal)),
-                ),
-        )
-        .push(vertical_space(Length::Fill))
-        .push(exit_row)
-        .into()
+    let labels: Vec<&str> = [green, yellow, orange]
+        .iter()
+        .map(|kind| match kind {
+            PenaltyKind::ThirtySecond => "30s",
+            PenaltyKind::OneMinute => "1m",
+            PenaltyKind::TwoMinute => "2m",
+            PenaltyKind::FourMinute => "4m",
+            PenaltyKind::FiveMinute => "5m",
+            PenaltyKind::TotalDismissal => "TD",
+        })
+        .collect();
+
+    let green_label = labels[0];
+    let yellow_label = labels[1];
+    let orange_label = labels[2];
+
+    let mut content = column![row![
+        make_smaller_button("BLACK")
+            .style(black_style)
+            .on_press(Message::ChangeColor(Some(GameColor::Black))),
+        make_smaller_button("WHITE")
+            .style(white_style)
+            .on_press(Message::ChangeColor(Some(GameColor::White))),
+    ]
+    .spacing(SPACING)]
+    .spacing(SPACING);
+
+    if config.track_fouls_and_warnings {
+        content = content.push(make_penalty_dropdown(infraction, false));
+    } else {
+        content = content.push(vertical_space(Length::Fill));
+    }
+
+    content = content.push(
+        row![
+            make_smaller_button(green_label)
+                .style(green_style)
+                .on_press(Message::ChangeKind(green)),
+            make_smaller_button(yellow_label)
+                .style(yellow_style)
+                .on_press(Message::ChangeKind(yellow)),
+            make_smaller_button(orange_label)
+                .style(orange_style)
+                .on_press(Message::ChangeKind(orange)),
+            make_smaller_button("TD")
+                .style(td_style)
+                .on_press(Message::ChangeKind(PenaltyKind::TotalDismissal)),
+        ]
+        .spacing(SPACING),
+    );
+
+    if !config.track_fouls_and_warnings {
+        content = content.push(vertical_space(Length::Fill));
+    }
+
+    content = content.push(exit_row);
+    content.into()
 }

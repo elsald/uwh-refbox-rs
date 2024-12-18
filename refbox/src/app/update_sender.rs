@@ -19,7 +19,7 @@ use tokio::{
     time::{sleep_until, timeout, Duration, Instant},
 };
 use tokio_serial::{SerialPortBuilder, SerialPortBuilderExt, SerialStream};
-use uwh_common::game_snapshot::{EncodingError, GameSnapshot, GameSnapshotNoHeap};
+use uwh_common::game_snapshot::{EncodingError, GamePeriod, GameSnapshot, GameSnapshotNoHeap};
 
 const TIMEOUT: Duration = Duration::from_millis(500);
 const SERIAL_SEND_SPACING: Duration = Duration::from_millis(100);
@@ -35,7 +35,12 @@ pub struct UpdateSender {
 }
 
 impl UpdateSender {
-    pub fn new(initial: Vec<SerialPortBuilder>, binary_port: u16, json_port: u16) -> Self {
+    pub fn new(
+        initial: Vec<SerialPortBuilder>,
+        binary_port: u16,
+        json_port: u16,
+        hide_time: bool,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(8);
 
         let initial = initial
@@ -43,7 +48,7 @@ impl UpdateSender {
             .map(|builder| builder.open_native_async().unwrap())
             .collect();
 
-        let server_join = task::spawn(Server::new(rx, initial).run_loop());
+        let server_join = task::spawn(Server::new(rx, initial, hide_time).run_loop());
 
         let listener_join = task::spawn(listener_loop(tx.clone(), binary_port, json_port));
 
@@ -58,9 +63,12 @@ impl UpdateSender {
         &self,
         snapshot: GameSnapshot,
         white_on_right: bool,
-    ) -> Result<(), TrySendError<GameSnapshot>> {
+    ) -> Result<(), TrySendError<Box<GameSnapshot>>> {
         self.tx
-            .try_send(ServerMessage::NewSnapshot(snapshot, white_on_right))
+            .try_send(ServerMessage::NewSnapshot(
+                Box::new(snapshot),
+                white_on_right,
+            ))
             .map_err(|e| match e {
                 TrySendError::Full(ServerMessage::NewSnapshot(snapshot, _)) => {
                     TrySendError::Full(snapshot)
@@ -77,6 +85,20 @@ impl UpdateSender {
     ) -> impl Send + Fn() -> Result<(), TrySendError<ServerMessage>> {
         let tx = self.tx.clone();
         move || tx.try_send(ServerMessage::TriggerFlash)
+    }
+
+    pub fn set_hide_time(&self, hide_time: bool) -> Result<(), TrySendError<bool>> {
+        self.tx
+            .try_send(ServerMessage::SetHideTime(hide_time))
+            .map_err(|e| match e {
+                TrySendError::Full(ServerMessage::SetHideTime(hide_time)) => {
+                    TrySendError::Full(hide_time)
+                }
+                TrySendError::Closed(ServerMessage::SetHideTime(hide_time)) => {
+                    TrySendError::Closed(hide_time)
+                }
+                _ => unreachable!(),
+            })
     }
 }
 
@@ -248,25 +270,34 @@ impl WorkerHandle {
         json: &[u8],
         snapshot: &GameSnapshotNoHeap,
         white_on_right: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), TrySendError<String>> {
         match self.tx {
-            WorkerTx::Binary(ref tx) => tx.try_send(Vec::from(binary))?,
-            WorkerTx::Json(ref tx) => tx.try_send(Vec::from(json))?,
-            WorkerTx::Serial(ref tx) => tx.try_send(SerialWorkerMessage::NewSnapshot(
-                snapshot.clone(),
-                white_on_right,
-            ))?,
-        };
-        Ok(())
+            WorkerTx::Binary(ref tx) => tx.try_send(Vec::from(binary)).map_err(error_formatter),
+            WorkerTx::Json(ref tx) => tx.try_send(Vec::from(json)).map_err(error_formatter),
+            WorkerTx::Serial(ref tx) => tx
+                .try_send(SerialWorkerMessage::NewSnapshot(
+                    snapshot.clone(),
+                    white_on_right,
+                ))
+                .map_err(error_formatter),
+        }
+    }
+}
+
+fn error_formatter<T: Debug>(old: TrySendError<T>) -> TrySendError<String> {
+    match old {
+        TrySendError::Closed(o) => TrySendError::Closed(format!("{o:?}")),
+        TrySendError::Full(o) => TrySendError::Closed(format!("{o:?}")),
     }
 }
 
 #[derive(Debug)]
 pub enum ServerMessage {
     NewConnection(SendType, TcpStream),
-    NewSnapshot(GameSnapshot, bool),
+    NewSnapshot(Box<GameSnapshot>, bool),
     TriggerFlash,
     Stop,
+    SetHideTime(bool),
 }
 
 #[derive(Debug)]
@@ -281,10 +312,15 @@ struct Server {
     flash: bool,
     binary: Vec<u8>,
     json: Vec<u8>,
+    hide_time: bool,
 }
 
 impl Server {
-    pub fn new(rx: mpsc::Receiver<ServerMessage>, initial: Vec<SerialStream>) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<ServerMessage>,
+        initial: Vec<SerialStream>,
+        hide_time: bool,
+    ) -> Self {
         let mut server = Server {
             next_id: 0,
             senders: HashMap::new(),
@@ -296,6 +332,7 @@ impl Server {
             flash: false,
             binary: Vec::new(),
             json: Vec::new(),
+            hide_time,
         };
 
         for stream in initial {
@@ -351,7 +388,33 @@ impl Server {
             Vec::new()
         };
 
+        let next_time = new_snapshot.next_period_len_secs.unwrap_or(0) as u16;
+
         self.snapshot = new_snapshot.into();
+
+        if self.hide_time {
+            match self.snapshot.current_period {
+                GamePeriod::BetweenGames
+                | GamePeriod::HalfTime
+                | GamePeriod::OvertimeHalfTime
+                | GamePeriod::PreOvertime => {
+                    if self.snapshot.secs_in_period < 15 {
+                        self.snapshot.secs_in_period = next_time;
+                    };
+                }
+                GamePeriod::PreSuddenDeath => {
+                    if self.snapshot.secs_in_period < 15 {
+                        self.snapshot.secs_in_period = 0;
+                    }
+                }
+                GamePeriod::FirstHalf
+                | GamePeriod::OvertimeFirstHalf
+                | GamePeriod::OvertimeSecondHalf
+                | GamePeriod::SecondHalf
+                | GamePeriod::SuddenDeath => {}
+            }
+        }
+
         self.encode_flash();
     }
 
@@ -380,15 +443,24 @@ impl Server {
             }
         };
 
-        for (_, handle) in self.senders.iter().filter(filter) {
+        let mut to_drop = vec![];
+        for (id, handle) in self.senders.iter().filter(filter) {
             if let Err(e) = handle.send(
                 &self.binary,
                 &self.json,
                 &self.snapshot,
                 self.white_on_right,
             ) {
-                error!("Error sending to worker: {e:?}");
+                if matches!(e, TrySendError::Closed(_)) {
+                    info!("Worker channel closed");
+                    to_drop.push(*id);
+                } else {
+                    error!("Error sending to worker: {e:?}");
+                }
             }
+        }
+        for id in to_drop {
+            self.senders.remove(&id);
         }
     }
 
@@ -414,7 +486,7 @@ impl Server {
                         }
                         Some(ServerMessage::NewSnapshot(snapshot, white_on_right)) => {
                             self.white_on_right = white_on_right;
-                            self.encode(snapshot);
+                            self.encode(*snapshot);
                             self.send_to_workers(false);
                         }
                         Some(ServerMessage::TriggerFlash) => {
@@ -425,13 +497,16 @@ impl Server {
                             for (_, handle) in self.senders.iter().filter(|(_, handle)| handle.is_serial()) {
                                 if let WorkerTx::Serial(tx) = &handle.tx {
                                     if let Err(e) = tx.try_send(SerialWorkerMessage::TriggerFlash) {
-                                        error!("Error sending to worker: {e:?}");
+                                        error!("Error sending to serial worker: {e:?}");
                                     }
                                 }
                             }
                         }
                         Some(ServerMessage::Stop) => {
                             break;
+                        }
+                        Some(ServerMessage::SetHideTime(hide_time)) => {
+                            self.hide_time = hide_time
                         }
                         None => {
                             break;
@@ -549,7 +624,9 @@ mod test {
     use more_asserts::*;
     use std::io::ErrorKind;
     use tokio::io::AsyncReadExt;
-    use uwh_common::game_snapshot::{GamePeriod, PenaltySnapshot, PenaltyTime, TimeoutSnapshot};
+    use uwh_common::game_snapshot::{
+        GamePeriod, Infraction, InfractionSnapshot, PenaltySnapshot, PenaltyTime, TimeoutSnapshot,
+    };
 
     const BINARY_PORT: u16 = 12345;
     const JSON_PORT: u16 = 12346;
@@ -557,7 +634,7 @@ mod test {
 
     #[tokio::test]
     async fn test_update_sender() {
-        let update_sender = UpdateSender::new(vec![], BINARY_PORT, JSON_PORT);
+        let update_sender = UpdateSender::new(vec![], BINARY_PORT, JSON_PORT, false);
 
         let mut binary_conn;
         let mut fail_count = 0;
@@ -628,20 +705,74 @@ mod test {
                 PenaltySnapshot {
                     time: PenaltyTime::Seconds(57),
                     player_number: 3,
+                    infraction: Infraction::Unknown,
                 },
                 PenaltySnapshot {
                     time: PenaltyTime::Seconds(117),
                     player_number: 6,
+                    infraction: Infraction::DelayOfGame,
                 },
             ],
             w_penalties: vec![
                 PenaltySnapshot {
                     time: PenaltyTime::Seconds(297),
                     player_number: 12,
+                    infraction: Infraction::FalseStart,
                 },
                 PenaltySnapshot {
                     time: PenaltyTime::TotalDismissal,
                     player_number: 15,
+                    infraction: Infraction::FreeArm,
+                },
+            ],
+            b_warnings: vec![
+                InfractionSnapshot {
+                    infraction: Infraction::Obstruction,
+                    player_number: Some(3),
+                },
+                InfractionSnapshot {
+                    infraction: Infraction::OutOfBounds,
+                    player_number: Some(6),
+                },
+            ],
+            w_warnings: vec![
+                InfractionSnapshot {
+                    infraction: Infraction::DelayOfGame,
+                    player_number: Some(12),
+                },
+                InfractionSnapshot {
+                    infraction: Infraction::StickInfringement,
+                    player_number: None,
+                },
+            ],
+            b_fouls: vec![
+                InfractionSnapshot {
+                    infraction: Infraction::Obstruction,
+                    player_number: Some(3),
+                },
+                InfractionSnapshot {
+                    infraction: Infraction::OutOfBounds,
+                    player_number: Some(6),
+                },
+            ],
+            w_fouls: vec![
+                InfractionSnapshot {
+                    infraction: Infraction::DelayOfGame,
+                    player_number: Some(12),
+                },
+                InfractionSnapshot {
+                    infraction: Infraction::StickInfringement,
+                    player_number: None,
+                },
+            ],
+            equal_fouls: vec![
+                InfractionSnapshot {
+                    infraction: Infraction::DelayOfGame,
+                    player_number: None,
+                },
+                InfractionSnapshot {
+                    infraction: Infraction::StickInfringement,
+                    player_number: None,
                 },
             ],
             is_old_game: true,

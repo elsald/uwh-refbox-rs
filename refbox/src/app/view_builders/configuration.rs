@@ -1,18 +1,24 @@
 use super::{
     message::*,
     shared_elements::*,
-    style::{self, MEDIUM_TEXT, MIN_BUTTON_SIZE, PADDING, SMALL_TEXT, SPACING},
+    style::{
+        ButtonStyle, ContainerStyle, Element, LINE_HEIGHT, MEDIUM_TEXT, MIN_BUTTON_SIZE, PADDING,
+        SMALL_PLUS_TEXT, SMALL_TEXT, SPACING,
+    },
 };
+use crate::config::Mode;
 use crate::sound_controller::*;
 use collect_array::CollectArrayResult;
 use iced::{
     alignment::{Horizontal, Vertical},
-    pure::{button, column, container, horizontal_space, row, text, vertical_space, Element},
+    widget::{button, column, container, horizontal_space, row, text, vertical_space, TextInput},
     Alignment, Length,
 };
 use std::collections::BTreeMap;
 use tokio::time::Duration;
-use uwh_common::{config::Game as GameConfig, game_snapshot::GameSnapshot, uwhscores::*};
+use uwh_common::{
+    config::Game as GameConfig, game_snapshot::GameSnapshot, uwhportal::TokenValidity, uwhscores::*,
+};
 
 const NO_SELECTION_TXT: &str = "None Selected";
 const LOADING_TXT: &str = "Loading...";
@@ -23,10 +29,17 @@ pub(in super::super) struct EditableSettings {
     pub game_number: u32,
     pub white_on_right: bool,
     pub using_uwhscores: bool,
+    pub uwhscores_email: String,
+    pub uwhscores_password: String,
+    pub uwhportal_token: String,
     pub current_tid: Option<u32>,
     pub current_pool: Option<String>,
     pub games: Option<BTreeMap<u32, GameInfo>>,
     pub sound: SoundSettings,
+    pub mode: Mode,
+    pub hide_time: bool,
+    pub collect_scorer_cap_num: bool,
+    pub track_fouls_and_warnings: bool,
 }
 
 pub(in super::super) trait Cyclable
@@ -77,18 +90,48 @@ impl Cyclable for Volume {
     }
 }
 
+impl Cyclable for Mode {
+    fn next(&self) -> Self {
+        match self {
+            Self::Hockey6V6 => Self::Hockey3V3,
+            Self::Hockey3V3 => Self::Rugby,
+            Self::Rugby => Self::Hockey6V6,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(in super::super) fn build_game_config_edit_page<'a>(
     snapshot: &GameSnapshot,
     settings: &EditableSettings,
     tournaments: &Option<BTreeMap<u32, TournamentInfo>>,
     page: ConfigPage,
+    mode: Mode,
+    clock_running: bool,
+    uwhscores_auth: &Option<Vec<u32>>,
+    uwhportal_token_valid: Option<(TokenValidity, Option<String>)>,
+    touchscreen: bool,
 ) -> Element<'a, Message> {
     match page {
-        ConfigPage::Main => make_main_config_page(snapshot, settings),
-        ConfigPage::Tournament => make_tournament_config_page(snapshot, settings, tournaments),
-        ConfigPage::Sound => make_sound_config_page(snapshot, settings),
+        ConfigPage::Main => make_main_config_page(snapshot, settings, mode, clock_running),
+        ConfigPage::Tournament => make_tournament_config_page(
+            snapshot,
+            settings,
+            tournaments,
+            mode,
+            clock_running,
+            uwhscores_auth,
+            uwhportal_token_valid,
+            touchscreen,
+        ),
+        ConfigPage::Sound => make_sound_config_page(snapshot, settings, mode, clock_running),
+        ConfigPage::Display => make_display_config_page(snapshot, settings, mode, clock_running),
+        ConfigPage::App => make_app_config_page(mode, snapshot, settings, clock_running),
+        ConfigPage::Credentials => {
+            make_credential_config_page(snapshot, settings, mode, clock_running)
+        }
         ConfigPage::Remotes(index, listening) => {
-            make_remote_config_page(snapshot, settings, index, listening)
+            make_remote_config_page(snapshot, settings, index, listening, mode, clock_running)
         }
     }
 }
@@ -96,6 +139,8 @@ pub(in super::super) fn build_game_config_edit_page<'a>(
 fn make_main_config_page<'a>(
     snapshot: &GameSnapshot,
     settings: &EditableSettings,
+    mode: Mode,
+    clock_running: bool,
 ) -> Element<'a, Message> {
     let EditableSettings {
         game_number,
@@ -146,56 +191,69 @@ fn make_main_config_page<'a>(
         game_number.to_string()
     };
 
-    column()
-        .spacing(SPACING)
-        .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(make_value_button(
-            "GAME:",
-            game_label,
-            (true, game_large_text),
-            game_btn_msg,
-        ))
-        .push(
+    column![
+        make_game_time_button(snapshot, false, false, mode, clock_running,),
+        make_value_button("GAME:", game_label, (true, game_large_text), game_btn_msg,),
+        row![
             make_message_button(
                 "TOURNAMENT OPTIONS",
                 Some(Message::ChangeConfigPage(ConfigPage::Tournament)),
             )
-            .style(style::Button::LightGray),
-        )
-        .push(
+            .style(ButtonStyle::LightGray),
             make_message_button(
-                "POOL AND SOUND OPTIONS",
+                "APP OPTIONS",
+                Some(Message::ChangeConfigPage(ConfigPage::App)),
+            )
+            .style(ButtonStyle::LightGray),
+        ]
+        .spacing(SPACING)
+        .width(Length::Fill)
+        .height(Length::Fill),
+        row![
+            make_message_button(
+                "DISPLAY OPTIONS",
+                Some(Message::ChangeConfigPage(ConfigPage::Display)),
+            )
+            .style(ButtonStyle::LightGray),
+            make_message_button(
+                "SOUND OPTIONS",
                 Some(Message::ChangeConfigPage(ConfigPage::Sound)),
             )
-            .style(style::Button::LightGray),
-        )
-        .push(vertical_space(Length::Fill))
-        .push(
-            row()
-                .spacing(SPACING)
+            .style(ButtonStyle::LightGray),
+        ]
+        .spacing(SPACING)
+        .width(Length::Fill)
+        .height(Length::Fill),
+        vertical_space(Length::Fill),
+        row![
+            make_button("CANCEL")
+                .style(ButtonStyle::Red)
                 .width(Length::Fill)
-                .push(
-                    make_button("CANCEL")
-                        .style(style::Button::Red)
-                        .width(Length::Fill)
-                        .on_press(Message::ConfigEditComplete { canceled: true }),
-                )
-                .push(horizontal_space(Length::Fill))
-                .push(
-                    make_button("DONE")
-                        .style(style::Button::Green)
-                        .width(Length::Fill)
-                        .on_press(Message::ConfigEditComplete { canceled: false }),
-                ),
-        )
-        .into()
+                .on_press(Message::ConfigEditComplete { canceled: true }),
+            horizontal_space(Length::Fill),
+            make_button("DONE")
+                .style(ButtonStyle::Green)
+                .width(Length::Fill)
+                .on_press(Message::ConfigEditComplete { canceled: false }),
+        ]
+        .spacing(SPACING)
+        .width(Length::Fill),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_tournament_config_page<'a>(
     snapshot: &GameSnapshot,
     settings: &EditableSettings,
     tournaments: &Option<BTreeMap<u32, TournamentInfo>>,
+    mode: Mode,
+    clock_running: bool,
+    uwhscores_auth: &Option<Vec<u32>>,
+    uwhportal_token_valid: Option<(TokenValidity, Option<String>)>,
+    touchscreen: bool,
 ) -> Element<'a, Message> {
     let EditableSettings {
         config,
@@ -249,6 +307,97 @@ fn make_tournament_config_page<'a>(
             .and_then(|tourns| tourns.get(&(*current_tid)?)?.pools.as_ref())
             .map(|_| Message::SelectParameter(ListableParameter::Pool));
 
+        let auth_container = |auth| {
+            let txt = match auth {
+                Some(true) => "OK",
+                Some(false) => "FAILED",
+                None => "CHECKING...",
+            };
+            let style = match auth {
+                Some(true) => ContainerStyle::Green,
+                Some(false) => ContainerStyle::Red,
+                None => ContainerStyle::Gray,
+            };
+            container(txt)
+                .center_x()
+                .center_y()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(style)
+        };
+
+        let uwhscores_auth_text = column![
+            text("UWHSCORES")
+                .size(SMALL_PLUS_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .horizontal_alignment(Horizontal::Right)
+                .width(Length::Fill),
+            text("LOGIN")
+                .size(SMALL_PLUS_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .horizontal_alignment(Horizontal::Right)
+                .width(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        let uwhportal_auth_text = column![
+            text("UWHPORTAL")
+                .size(SMALL_PLUS_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .horizontal_alignment(Horizontal::Right)
+                .width(Length::Fill),
+            text("TOKEN")
+                .size(SMALL_PLUS_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .horizontal_alignment(Horizontal::Right)
+                .width(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        let uwhscores_auth = uwhscores_auth.as_ref().and_then(|auth| {
+            if auth.is_empty() {
+                Some(false)
+            } else {
+                Some(auth.contains(current_tid.as_ref()?))
+            }
+        });
+
+        let uwhportal_auth = if matches!(uwhportal_token_valid, Some((TokenValidity::Invalid, _))) {
+            Some(false)
+        } else {
+            None
+        };
+
+        let auth_btn_msg = if touchscreen {
+            Message::NoAction
+        } else {
+            Message::ChangeConfigPage(ConfigPage::Credentials)
+        };
+
+        let auth_state_button = button(
+            row![
+                uwhscores_auth_text,
+                auth_container(uwhscores_auth),
+                uwhportal_auth_text,
+                auth_container(uwhportal_auth),
+            ]
+            .padding(PADDING)
+            .spacing(SPACING)
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .height(Length::Fixed(MIN_BUTTON_SIZE))
+        .width(Length::Fill)
+        .padding(0)
+        .style(ButtonStyle::LightGray)
+        .on_press(auth_btn_msg);
+
         [
             make_value_button(
                 "TOURNAMENT:",
@@ -261,58 +410,56 @@ fn make_tournament_config_page<'a>(
             make_value_button("COURT:", pool_label, (true, true), pool_btn_msg)
                 .height(Length::Fill)
                 .into(),
-            vertical_space(Length::Fill).into(),
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(horizontal_space(Length::Fill))
-                .push(horizontal_space(Length::Fill))
-                .push(
-                    make_button("DONE")
-                        .style(style::Button::Green)
-                        .width(Length::Fill)
-                        .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
-                )
-                .into(),
+            auth_state_button.into(),
+            row![
+                horizontal_space(Length::Fill),
+                horizontal_space(Length::Fill),
+                make_button("DONE")
+                    .style(ButtonStyle::Green)
+                    .width(Length::Fill)
+                    .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
+            ]
+            .spacing(SPACING)
+            .height(Length::Fill)
+            .into(),
         ]
     } else {
         [
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
+            row![
+                make_value_button(
                     "HALF LENGTH:",
                     time_string(config.half_play_duration),
                     (false, true),
                     Some(Message::EditParameter(LengthParameter::Half)),
-                ))
-                .push(make_value_button(
+                ),
+                make_value_button(
                     "OVERTIME\nALLOWED:",
                     bool_string(config.overtime_allowed),
                     (false, true),
                     Some(Message::ToggleBoolParameter(
                         BoolGameParameter::OvertimeAllowed,
                     )),
-                ))
-                .push(make_value_button(
+                ),
+                make_value_button(
                     "SUDDEN DEATH\nALLOWED:",
                     bool_string(config.sudden_death_allowed),
                     (false, true),
                     Some(Message::ToggleBoolParameter(
                         BoolGameParameter::SuddenDeathAllowed,
                     )),
-                ))
-                .into(),
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
+                )
+            ]
+            .spacing(SPACING)
+            .height(Length::Fill)
+            .into(),
+            row![
+                make_value_button(
                     "HALF TIME\nLENGTH:",
                     time_string(config.half_time_duration),
                     (false, true),
                     Some(Message::EditParameter(LengthParameter::HalfTime)),
-                ))
-                .push(make_value_button(
+                ),
+                make_value_button(
                     "PRE OT\nBREAK LENGTH:",
                     time_string(config.pre_overtime_break),
                     (false, true),
@@ -321,8 +468,8 @@ fn make_tournament_config_page<'a>(
                     } else {
                         None
                     },
-                ))
-                .push(make_value_button(
+                ),
+                make_value_button(
                     "PRE SD\nBREAK LENGTH:",
                     time_string(config.pre_sudden_death_duration),
                     (false, true),
@@ -331,18 +478,19 @@ fn make_tournament_config_page<'a>(
                     } else {
                         None
                     },
-                ))
-                .into(),
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
+                )
+            ]
+            .spacing(SPACING)
+            .height(Length::Fill)
+            .into(),
+            row![
+                make_value_button(
                     "NOMINAL BRK\nBTWN GAMES:",
                     time_string(config.nominal_break),
                     (false, true),
                     Some(Message::EditParameter(LengthParameter::NominalBetweenGame)),
-                ))
-                .push(make_value_button(
+                ),
+                make_value_button(
                     "OT HALF\nLENGTH:",
                     time_string(config.ot_half_play_duration),
                     (false, true),
@@ -351,26 +499,28 @@ fn make_tournament_config_page<'a>(
                     } else {
                         None
                     },
-                ))
-                .push(make_value_button(
-                    "NUM TEAM T/Os\nALLWD PER HALF:",
-                    config.team_timeouts_per_half.to_string(),
+                ),
+                make_value_button(
+                    "NUM TEAM T/Os\nALLOWED:",
+                    config.num_team_timeouts_allowed.to_string(),
                     (false, true),
                     Some(Message::KeypadPage(KeypadPage::TeamTimeouts(
                         config.team_timeout_duration,
+                        config.timeouts_counted_per_half,
                     ))),
-                ))
-                .into(),
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
+                )
+            ]
+            .spacing(SPACING)
+            .height(Length::Fill)
+            .into(),
+            row![
+                make_value_button(
                     "MINIMUM BRK\nBTWN GAMES:",
                     time_string(config.minimum_break),
                     (false, true),
                     Some(Message::EditParameter(LengthParameter::MinimumBetweenGame)),
-                ))
-                .push(make_value_button(
+                ),
+                make_value_button(
                     "OT HALF\nTIME LENGTH:",
                     time_string(config.ot_half_time_duration),
                     (false, true),
@@ -379,32 +529,32 @@ fn make_tournament_config_page<'a>(
                     } else {
                         None
                     },
-                ))
-                .push(
-                    make_button("DONE")
-                        .style(style::Button::Green)
-                        .width(Length::Fill)
-                        .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
-                )
-                .into(),
+                ),
+                make_button("DONE")
+                    .style(ButtonStyle::Green)
+                    .width(Length::Fill)
+                    .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
+            ]
+            .spacing(SPACING)
+            .height(Length::Fill)
+            .into(),
         ]
     };
 
-    let mut col = column()
-        .spacing(SPACING)
-        .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(
-            make_value_button(
-                "USING UWHPORTAL:",
-                bool_string(using_uwhscores),
-                (true, true),
-                Some(Message::ToggleBoolParameter(
-                    BoolGameParameter::UsingUwhScores,
-                )),
-            )
-            .height(Length::Fill),
-        );
+    let mut col = column![
+        make_game_time_button(snapshot, false, false, mode, clock_running),
+        make_value_button(
+            "USING UWHPORTAL:",
+            bool_string(using_uwhscores),
+            (true, true),
+            Some(Message::ToggleBoolParameter(
+                BoolGameParameter::UsingUwhScores,
+            )),
+        )
+        .height(Length::Fill),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill);
 
     for row in rows {
         col = col.push(row);
@@ -413,13 +563,78 @@ fn make_tournament_config_page<'a>(
     col.into()
 }
 
-fn make_sound_config_page<'a>(
+fn make_app_config_page<'a>(
+    mode: Mode,
     snapshot: &GameSnapshot,
     settings: &EditableSettings,
+    clock_running: bool,
+) -> Element<'a, Message> {
+    let EditableSettings {
+        collect_scorer_cap_num,
+        track_fouls_and_warnings,
+        ..
+    } = settings;
+
+    column![
+        make_game_time_button(snapshot, false, true, mode, clock_running),
+        row![
+            make_value_button(
+                "APP\nMODE",
+                settings.mode.to_string().to_uppercase(),
+                (false, true),
+                Some(Message::CycleParameter(CyclingParameter::Mode)),
+            ),
+            make_value_button(
+                "TRACK CAP NUMBER\nOF SCORER",
+                bool_string(*collect_scorer_cap_num),
+                (false, true),
+                Some(Message::ToggleBoolParameter(
+                    BoolGameParameter::ScorerCapNum,
+                )),
+            ),
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill),
+        row![
+            make_value_button(
+                "TRACK FOULS\nAND WARNINGS",
+                bool_string(*track_fouls_and_warnings),
+                (false, true),
+                Some(Message::ToggleBoolParameter(
+                    BoolGameParameter::FoulsAndWarnings,
+                )),
+            ),
+            horizontal_space(Length::Fill),
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill),
+        vertical_space(Length::Fill),
+        vertical_space(Length::Fill),
+        row![
+            horizontal_space(Length::Fill),
+            horizontal_space(Length::Fill),
+            make_button("DONE")
+                .style(ButtonStyle::Green)
+                .width(Length::Fill)
+                .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill)
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
+}
+
+fn make_display_config_page<'a>(
+    snapshot: &GameSnapshot,
+    settings: &EditableSettings,
+    mode: Mode,
+    clock_running: bool,
 ) -> Element<'a, Message> {
     let EditableSettings {
         white_on_right,
-        sound,
+        hide_time,
         ..
     } = settings;
 
@@ -428,16 +643,17 @@ fn make_sound_config_page<'a>(
         .center_y()
         .width(Length::FillPortion(2))
         .height(Length::Fill)
-        .style(style::Container::White);
+        .style(ContainerStyle::White);
     let black = container("BLACK")
         .center_x()
         .center_y()
         .width(Length::FillPortion(2))
         .height(Length::Fill)
-        .style(style::Container::Black);
+        .style(ContainerStyle::Black);
 
     let center = text("STARTING SIDES")
         .size(MEDIUM_TEXT)
+        .line_height(LINE_HEIGHT)
         .vertical_alignment(Vertical::Center)
         .horizontal_alignment(Horizontal::Center)
         .width(Length::FillPortion(3));
@@ -446,147 +662,169 @@ fn make_sound_config_page<'a>(
     // of view we need to reverse the direction
     let sides = if *white_on_right {
         // White to Ref's left
-        row().padding(PADDING).push(white).push(center).push(black)
+        row![white, center, black].padding(PADDING)
     } else {
         // White to Ref's right
-        row().padding(PADDING).push(black).push(center).push(white)
+        row![black, center, white].padding(PADDING)
     };
 
     let sides_btn = button(sides.width(Length::Fill).height(Length::Fill))
-        .height(Length::Fill)
+        .height(Length::Fixed(MIN_BUTTON_SIZE))
         .width(Length::Fill)
         .padding(0)
-        .style(style::Button::LightGray)
+        .style(ButtonStyle::LightGray)
         .on_press(Message::ToggleBoolParameter(
             BoolGameParameter::WhiteOnRight,
         ));
 
-    column()
+    column![
+        make_game_time_button(snapshot, false, false, mode, clock_running),
+        row![sides_btn].spacing(SPACING),
+        row![make_value_button(
+            "HIDE TIME FOR\nLAST 15 SECONDS",
+            bool_string(*hide_time),
+            (false, true),
+            Some(Message::ToggleBoolParameter(BoolGameParameter::HideTime))
+        )]
+        .spacing(SPACING),
+        vertical_space(Length::Fill),
+        row![
+            horizontal_space(Length::Fill),
+            horizontal_space(Length::Fill),
+            make_button("DONE")
+                .style(ButtonStyle::Green)
+                .width(Length::Fill)
+                .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
+        ]
         .spacing(SPACING)
-        .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(sides_btn)
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
-                    "SOUND\nENABLED:",
-                    bool_string(sound.sound_enabled),
-                    (false, true),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
+}
+
+fn make_sound_config_page<'a>(
+    snapshot: &GameSnapshot,
+    settings: &EditableSettings,
+    mode: Mode,
+    clock_running: bool,
+) -> Element<'a, Message> {
+    let EditableSettings { sound, .. } = settings;
+
+    column![
+        make_game_time_button(snapshot, false, true, mode, clock_running),
+        row![
+            make_value_button(
+                "SOUND\nENABLED:",
+                bool_string(sound.sound_enabled),
+                (false, true),
+                Some(Message::ToggleBoolParameter(
+                    BoolGameParameter::SoundEnabled,
+                )),
+            ),
+            make_value_button(
+                "WHISTLE\nVOLUME:",
+                sound.whistle_vol.to_string().to_uppercase(),
+                (false, true),
+                if sound.sound_enabled && sound.whistle_enabled {
+                    Some(Message::CycleParameter(CyclingParameter::AlertVolume))
+                } else {
+                    None
+                },
+            ),
+            make_message_button(
+                "MANAGE REMOTES",
+                Some(Message::ChangeConfigPage(ConfigPage::Remotes(0, false))),
+            )
+            .style(ButtonStyle::LightGray),
+        ]
+        .spacing(SPACING),
+        row![
+            make_value_button(
+                "WHISTLE\nENABLED:",
+                bool_string(sound.whistle_enabled),
+                (false, true),
+                if sound.sound_enabled {
                     Some(Message::ToggleBoolParameter(
-                        BoolGameParameter::SoundEnabled,
-                    )),
-                ))
-                .push(make_value_button(
-                    "WHISTLE\nVOLUME:",
-                    sound.whistle_vol.to_string().to_uppercase(),
-                    (false, true),
-                    if sound.sound_enabled && sound.whistle_enabled {
-                        Some(Message::CycleParameter(CyclingParameter::AlertVolume))
-                    } else {
-                        None
-                    },
-                ))
-                .push(
-                    make_message_button(
-                        "MANAGE REMOTES",
-                        Some(Message::ChangeConfigPage(ConfigPage::Remotes(0, false))),
-                    )
-                    .style(style::Button::LightGray)
-                    .height(Length::Fill),
-                ),
-        )
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
-                    "WHISTLE\nENABLED:",
-                    bool_string(sound.whistle_enabled),
-                    (false, true),
-                    if sound.sound_enabled {
-                        Some(Message::ToggleBoolParameter(
-                            BoolGameParameter::RefAlertEnabled,
-                        ))
-                    } else {
-                        None
-                    },
-                ))
-                .push(make_value_button(
-                    "ABOVE WATER\nVOLUME:",
-                    sound.above_water_vol.to_string().to_uppercase(),
-                    (false, true),
-                    if sound.sound_enabled {
-                        Some(Message::CycleParameter(CyclingParameter::AboveWaterVol))
-                    } else {
-                        None
-                    },
-                ))
-                .push(make_value_button(
-                    "AUTO SOUND\nSTART PLAY:",
-                    bool_string(sound.auto_sound_start_play),
-                    (false, true),
-                    if sound.sound_enabled {
-                        Some(Message::ToggleBoolParameter(
-                            BoolGameParameter::AutoSoundStartPlay,
-                        ))
-                    } else {
-                        None
-                    },
-                )),
-        )
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(make_value_button(
-                    "BUZZER\nSOUND:",
-                    sound.buzzer_sound.to_string().to_uppercase(),
-                    (false, true),
-                    if sound.sound_enabled {
-                        Some(Message::CycleParameter(CyclingParameter::BuzzerSound))
-                    } else {
-                        None
-                    },
-                ))
-                .push(make_value_button(
-                    "UNDER WATER\nVOLUME:",
-                    sound.under_water_vol.to_string().to_uppercase(),
-                    (false, true),
-                    if sound.sound_enabled {
-                        Some(Message::CycleParameter(CyclingParameter::UnderWaterVol))
-                    } else {
-                        None
-                    },
-                ))
-                .push(make_value_button(
-                    "AUTO SOUND\nSTOP PLAY:",
-                    bool_string(sound.auto_sound_stop_play),
-                    (false, true),
-                    if sound.sound_enabled {
-                        Some(Message::ToggleBoolParameter(
-                            BoolGameParameter::AutoSoundStopPlay,
-                        ))
-                    } else {
-                        None
-                    },
-                )),
-        )
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(horizontal_space(Length::Fill))
-                .push(horizontal_space(Length::Fill))
-                .push(
-                    make_button("DONE")
-                        .style(style::Button::Green)
-                        .width(Length::Fill)
-                        .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
-                ),
-        )
-        .into()
+                        BoolGameParameter::RefAlertEnabled,
+                    ))
+                } else {
+                    None
+                },
+            ),
+            make_value_button(
+                "ABOVE WATER\nVOLUME:",
+                sound.above_water_vol.to_string().to_uppercase(),
+                (false, true),
+                if sound.sound_enabled {
+                    Some(Message::CycleParameter(CyclingParameter::AboveWaterVol))
+                } else {
+                    None
+                },
+            ),
+            make_value_button(
+                "AUTO SOUND\nSTART PLAY:",
+                bool_string(sound.auto_sound_start_play),
+                (false, true),
+                if sound.sound_enabled {
+                    Some(Message::ToggleBoolParameter(
+                        BoolGameParameter::AutoSoundStartPlay,
+                    ))
+                } else {
+                    None
+                },
+            )
+        ]
+        .spacing(SPACING),
+        row![
+            make_value_button(
+                "BUZZER\nSOUND:",
+                sound.buzzer_sound.to_string().to_uppercase(),
+                (false, true),
+                if sound.sound_enabled {
+                    Some(Message::CycleParameter(CyclingParameter::BuzzerSound))
+                } else {
+                    None
+                },
+            ),
+            make_value_button(
+                "UNDER WATER\nVOLUME:",
+                sound.under_water_vol.to_string().to_uppercase(),
+                (false, true),
+                if sound.sound_enabled {
+                    Some(Message::CycleParameter(CyclingParameter::UnderWaterVol))
+                } else {
+                    None
+                },
+            ),
+            make_value_button(
+                "AUTO SOUND\nSTOP PLAY:",
+                bool_string(sound.auto_sound_stop_play),
+                (false, true),
+                if sound.sound_enabled {
+                    Some(Message::ToggleBoolParameter(
+                        BoolGameParameter::AutoSoundStopPlay,
+                    ))
+                } else {
+                    None
+                },
+            )
+        ]
+        .spacing(SPACING),
+        vertical_space(Length::Fill),
+        row![
+            horizontal_space(Length::Fill),
+            horizontal_space(Length::Fill),
+            make_button("DONE")
+                .style(ButtonStyle::Green)
+                .width(Length::Fill)
+                .on_press(Message::ChangeConfigPage(ConfigPage::Main)),
+        ]
+        .spacing(SPACING),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
 }
 
 fn make_remote_config_page<'a>(
@@ -594,10 +832,13 @@ fn make_remote_config_page<'a>(
     settings: &EditableSettings,
     index: usize,
     listening: bool,
+    mode: Mode,
+    clock_running: bool,
 ) -> Element<'a, Message> {
     const REMOTES_LIST_LEN: usize = 4;
 
     let title = text("REMOTES")
+        .line_height(LINE_HEIGHT)
         .height(Length::Fill)
         .width(Length::Fill)
         .horizontal_alignment(Horizontal::Center)
@@ -622,44 +863,40 @@ fn make_remote_config_page<'a>(
                 let sound_text = format!("SOUND: {}", sound_text);
 
                 container(
-                    row()
-                        .padding(PADDING)
-                        .spacing(SPACING)
-                        .push(
-                            text(format!("ID: {:05X}", rem_info.id))
-                                .size(MEDIUM_TEXT)
-                                .vertical_alignment(Vertical::Center)
-                                .horizontal_alignment(Horizontal::Center)
-                                .height(Length::Fill)
-                                .width(Length::Fill),
+                    row![
+                        text(format!("ID: {:05X}", rem_info.id))
+                            .size(MEDIUM_TEXT)
+                            .line_height(LINE_HEIGHT)
+                            .vertical_alignment(Vertical::Center)
+                            .horizontal_alignment(Horizontal::Center)
+                            .height(Length::Fill)
+                            .width(Length::Fill),
+                        make_message_button(
+                            sound_text,
+                            Some(Message::CycleParameter(
+                                CyclingParameter::RemoteBuzzerSound(idx),
+                            )),
                         )
-                        .push(
-                            make_message_button(
-                                sound_text,
-                                Some(Message::CycleParameter(
-                                    CyclingParameter::RemoteBuzzerSound(idx),
-                                )),
-                            )
-                            .width(Length::Units(275))
-                            .height(Length::Units(MIN_BUTTON_SIZE - (2 * PADDING)))
-                            .style(style::Button::Yellow),
-                        )
-                        .push(
-                            make_message_button("DELETE", Some(Message::DeleteRemote(idx)))
-                                .width(Length::Units(130))
-                                .height(Length::Units(MIN_BUTTON_SIZE - (2 * PADDING)))
-                                .style(style::Button::Red),
-                        ),
+                        .width(Length::Fixed(275.0))
+                        .height(Length::Fixed(MIN_BUTTON_SIZE - (2.0 * PADDING)))
+                        .style(ButtonStyle::Yellow),
+                        make_message_button("DELETE", Some(Message::DeleteRemote(idx)))
+                            .width(Length::Fixed(130.0))
+                            .height(Length::Fixed(MIN_BUTTON_SIZE - (2.0 * PADDING)))
+                            .style(ButtonStyle::Red),
+                    ]
+                    .padding(PADDING)
+                    .spacing(SPACING),
                 )
                 .width(Length::Fill)
-                .height(Length::Units(MIN_BUTTON_SIZE))
-                .style(style::Container::Gray)
+                .height(Length::Fixed(MIN_BUTTON_SIZE))
+                .style(ContainerStyle::Gray)
                 .into()
             } else {
                 container(horizontal_space(Length::Fill))
                     .width(Length::Fill)
-                    .height(Length::Units(MIN_BUTTON_SIZE))
-                    .style(style::Container::Disabled)
+                    .height(Length::Fixed(MIN_BUTTON_SIZE))
+                    .style(ContainerStyle::Disabled)
                     .into()
             }
         })
@@ -670,52 +907,119 @@ fn make_remote_config_page<'a>(
     } else {
         make_message_button("ADD", Some(Message::RequestRemoteId))
     }
-    .style(style::Button::Orange);
+    .style(ButtonStyle::Orange);
 
-    column()
+    column![
+        make_game_time_button(snapshot, false, false, mode, clock_running),
+        row![
+            make_scroll_list(
+                buttons.unwrap(),
+                settings.sound.remotes.len(),
+                index,
+                title,
+                ScrollOption::GameParameter,
+                ContainerStyle::LightGray,
+            )
+            .height(Length::Fill)
+            .width(Length::FillPortion(5)),
+            column![
+                vertical_space(Length::Fill),
+                add_btn,
+                make_message_button("DONE", Some(Message::ChangeConfigPage(ConfigPage::Sound)),)
+                    .style(ButtonStyle::Green),
+            ]
+            .spacing(SPACING)
+            .height(Length::Fill)
+            .width(Length::Fill),
+        ]
         .spacing(SPACING)
         .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
+        .width(Length::Fill),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
+}
+
+fn make_credential_config_page<'a>(
+    snapshot: &GameSnapshot,
+    settings: &EditableSettings,
+    mode: Mode,
+    clock_running: bool,
+) -> Element<'a, Message> {
+    let EditableSettings {
+        uwhscores_email,
+        uwhscores_password,
+        uwhportal_token,
+        ..
+    } = settings;
+
+    column![
+        make_game_time_button(snapshot, false, false, mode, clock_running),
+        row![
+            text("UWHSCORES EMAIL:")
+                .size(MEDIUM_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .height(Length::Fill),
+            TextInput::new("", uwhscores_email,)
+                .on_input(|s| Message::TextParameterChanged(TextParameter::UwhscoresEmail, s))
                 .width(Length::Fill)
-                .push(
-                    make_scroll_list(
-                        buttons.unwrap(),
-                        settings.sound.remotes.len(),
-                        index,
-                        title,
-                        ScrollOption::GameParameter,
-                        style::Container::LightGray,
-                    )
-                    .height(Length::Fill)
-                    .width(Length::FillPortion(5)),
-                )
-                .push(
-                    column()
-                        .spacing(SPACING)
-                        .height(Length::Fill)
-                        .width(Length::Fill)
-                        .push(vertical_space(Length::Fill))
-                        .push(add_btn)
-                        .push(
-                            make_message_button(
-                                "DONE",
-                                Some(Message::ChangeConfigPage(ConfigPage::Sound)),
-                            )
-                            .style(style::Button::Green),
-                        ),
-                ),
-        )
-        .into()
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill),
+        row![
+            text("UWHSCORES PASSWORD:")
+                .size(MEDIUM_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .height(Length::Fill),
+            TextInput::new("", uwhscores_password,)
+                .on_input(|s| Message::TextParameterChanged(TextParameter::UwhscoresPassword, s))
+                .password()
+                .width(Length::Fill)
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill),
+        row![
+            text("UWHPORTAL TOKEN:")
+                .size(MEDIUM_TEXT)
+                .line_height(LINE_HEIGHT)
+                .vertical_alignment(Vertical::Center)
+                .height(Length::Fill),
+            TextInput::new("", uwhportal_token,)
+                .on_input(|s| Message::TextParameterChanged(TextParameter::UwhportalToken, s))
+                .password()
+                .width(Length::Fill)
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill),
+        vertical_space(Length::Fill),
+        row![
+            make_button("CANCEL")
+                .style(ButtonStyle::Red)
+                .width(Length::Fill)
+                .on_press(Message::ChangeConfigPage(ConfigPage::Tournament)),
+            horizontal_space(Length::Fill),
+            make_button("DONE")
+                .style(ButtonStyle::Green)
+                .width(Length::Fill)
+                .on_press(Message::ApplyAuthChanges),
+        ]
+        .spacing(SPACING)
+        .height(Length::Fill),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
 }
 
 pub(in super::super) fn build_game_parameter_editor<'a>(
     snapshot: &GameSnapshot,
     param: LengthParameter,
     length: Duration,
+    mode: Mode,
+    clock_running: bool,
 ) -> Element<'a, Message> {
     let (title, hint) = match param {
         LengthParameter::Half => ("HALF LEN", "The length of a half during regular play"),
@@ -750,37 +1054,32 @@ pub(in super::super) fn build_game_parameter_editor<'a>(
         ),
     };
 
-    column()
-        .spacing(SPACING)
-        .align_items(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(vertical_space(Length::Fill))
-        .push(make_time_editor(title, length, false))
-        .push(vertical_space(Length::Fill))
-        .push(
-            text(String::from("Help: ") + hint)
-                .size(SMALL_TEXT)
-                .horizontal_alignment(Horizontal::Center),
-        )
-        .push(vertical_space(Length::Fill))
-        .push(
-            row()
-                .spacing(SPACING)
-                .push(
-                    make_button("CANCEL")
-                        .style(style::Button::Red)
-                        .width(Length::Fill)
-                        .on_press(Message::ParameterEditComplete { canceled: true }),
-                )
-                .push(horizontal_space(Length::Fill))
-                .push(
-                    make_button("DONE")
-                        .style(style::Button::Green)
-                        .width(Length::Fill)
-                        .on_press(Message::ParameterEditComplete { canceled: false }),
-                ),
-        )
-        .into()
+    column![
+        make_game_time_button(snapshot, false, false, mode, clock_running),
+        vertical_space(Length::Fill),
+        make_time_editor(title, length, false),
+        vertical_space(Length::Fill),
+        text(String::from("Help: ") + hint)
+            .size(SMALL_TEXT)
+            .line_height(LINE_HEIGHT)
+            .horizontal_alignment(Horizontal::Center),
+        vertical_space(Length::Fill),
+        row![
+            make_button("CANCEL")
+                .style(ButtonStyle::Red)
+                .width(Length::Fill)
+                .on_press(Message::ParameterEditComplete { canceled: true }),
+            horizontal_space(Length::Fill),
+            make_button("DONE")
+                .style(ButtonStyle::Green)
+                .width(Length::Fill)
+                .on_press(Message::ParameterEditComplete { canceled: false }),
+        ]
+        .spacing(SPACING),
+    ]
+    .spacing(SPACING)
+    .align_items(Alignment::Center)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

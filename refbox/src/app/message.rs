@@ -1,7 +1,7 @@
-use crate::tournament_manager::PenaltyKind;
+use crate::tournament_manager::penalty::PenaltyKind;
 use tokio::time::Duration;
 use uwh_common::{
-    game_snapshot::{Color as GameColor, GameSnapshot},
+    game_snapshot::{Color as GameColor, GameSnapshot, Infraction},
     uwhscores::{GameInfo, TournamentInfo},
 };
 
@@ -20,6 +20,7 @@ pub enum Message {
     },
     StartPlayNow,
     EditScores,
+    AddNewScore(GameColor),
     ChangeScore {
         color: GameColor,
         increase: bool,
@@ -28,6 +29,8 @@ pub enum Message {
         canceled: bool,
     },
     PenaltyOverview,
+    WarningOverview,
+    FoulOverview,
     Scroll {
         which: ScrollOption,
         up: bool,
@@ -35,17 +38,36 @@ pub enum Message {
     PenaltyOverviewComplete {
         canceled: bool,
     },
+    WarningOverviewComplete {
+        canceled: bool,
+    },
+    FoulOverviewComplete {
+        canceled: bool,
+    },
     ChangeKind(PenaltyKind),
+    ChangeInfraction(Infraction),
     PenaltyEditComplete {
         canceled: bool,
         deleted: bool,
     },
+    WarningEditComplete {
+        canceled: bool,
+        deleted: bool,
+        ret_to_overview: bool,
+    },
+    FoulEditComplete {
+        canceled: bool,
+        deleted: bool,
+        ret_to_overview: bool,
+    },
     KeypadPage(KeypadPage),
     KeypadButtonPress(KeypadButton),
-    ChangeColor(GameColor),
+    ChangeColor(Option<GameColor>),
     AddScoreComplete {
         canceled: bool,
     },
+    ShowGameDetails,
+    ShowWarnings,
     EditGameConfig,
     ChangeConfigPage(ConfigPage),
     ConfigEditComplete {
@@ -59,12 +81,13 @@ pub enum Message {
     ParameterSelected(ListableParameter, usize),
     ToggleBoolParameter(BoolGameParameter),
     CycleParameter(CyclingParameter),
+    TextParameterChanged(TextParameter, String),
+    ApplyAuthChanges,
     RequestRemoteId,
     GotRemoteId(u32),
     DeleteRemote(usize),
     ConfirmationSelected(ConfirmationOption),
-    BlackTimeout(bool),
-    WhiteTimeout(bool),
+    TeamTimeout(GameColor, bool),
     RefTimeout(bool),
     PenaltyShot(bool),
     EndTimeout,
@@ -76,6 +99,9 @@ pub enum Message {
     RecvTournament(TournamentInfo),
     RecvGameList(Vec<GameInfo>),
     RecvGame(GameInfo),
+    StopClock,
+    StartClock,
+    UwhScoresAuthChecked(Vec<u32>),
     NoAction, // TODO: Remove once UI is functional
 }
 
@@ -100,14 +126,24 @@ impl Message {
             | Self::TimeEditComplete { .. }
             | Self::StartPlayNow
             | Self::EditScores
+            | Self::AddNewScore(_)
             | Self::ScoreEditComplete { .. }
             | Self::PenaltyOverview
+            | Self::WarningOverview
+            | Self::FoulOverview
             | Self::PenaltyOverviewComplete { .. }
+            | Self::WarningOverviewComplete { .. }
+            | Self::FoulOverviewComplete { .. }
             | Self::ChangeKind(_)
+            | Self::ChangeInfraction(_)
             | Self::PenaltyEditComplete { .. }
+            | Self::WarningEditComplete { .. }
+            | Self::FoulEditComplete { .. }
             | Self::KeypadPage(_)
             | Self::ChangeColor(_)
             | Self::AddScoreComplete { .. }
+            | Self::ShowGameDetails
+            | Self::ShowWarnings
             | Self::EditGameConfig
             | Self::ChangeConfigPage(_)
             | Self::ConfigEditComplete { .. }
@@ -115,17 +151,21 @@ impl Message {
             | Self::SelectParameter(_)
             | Self::ParameterEditComplete { .. }
             | Self::ParameterSelected(_, _)
+            | Self::TextParameterChanged(_, _)
+            | Self::ApplyAuthChanges
             | Self::RequestRemoteId
             | Self::GotRemoteId(_)
             | Self::DeleteRemote(_)
             | Self::ConfirmationSelected(_)
-            | Self::BlackTimeout(_)
-            | Self::WhiteTimeout(_)
+            | Self::TeamTimeout(_, _)
             | Self::RefTimeout(_)
             | Self::PenaltyShot(_)
             | Self::EndTimeout
             | Self::ConfirmScores(_)
-            | Self::ScoreConfirmation { .. } => false,
+            | Self::ScoreConfirmation { .. }
+            | Self::StopClock
+            | Self::StartClock
+            | Self::UwhScoresAuthChecked(_) => false,
         }
     }
 }
@@ -135,6 +175,9 @@ pub enum ConfigPage {
     Main,
     Tournament,
     Sound,
+    Display,
+    App,
+    Credentials,
     Remotes(usize, bool),
 }
 
@@ -167,6 +210,11 @@ pub enum BoolGameParameter {
     RefAlertEnabled,
     AutoSoundStartPlay,
     AutoSoundStopPlay,
+    HideTime,
+    ScorerCapNum,
+    FoulsAndWarnings,
+    TeamWarning,
+    TimeoutsCountedPerHalf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,37 +224,71 @@ pub enum CyclingParameter {
     AlertVolume,
     AboveWaterVol,
     UnderWaterVol,
+    Mode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextParameter {
+    UwhscoresEmail,
+    UwhscoresPassword,
+    UwhportalToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollOption {
     Black,
     White,
+    Equal,
     GameParameter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeypadPage {
     AddScore(GameColor),
-    Penalty(Option<(GameColor, usize)>, GameColor, PenaltyKind),
+    Penalty(
+        Option<(GameColor, usize)>,
+        GameColor,
+        PenaltyKind,
+        Infraction,
+    ),
     GameNumber,
-    TeamTimeouts(Duration),
+    TeamTimeouts(Duration, bool),
+    FoulAdd {
+        origin: Option<(Option<GameColor>, usize)>,
+        color: Option<GameColor>,
+        infraction: Infraction,
+        ret_to_overview: bool,
+    },
+    WarningAdd {
+        origin: Option<(GameColor, usize)>,
+        color: GameColor,
+        infraction: Infraction,
+        team_warning: bool,
+        ret_to_overview: bool,
+    },
 }
 
 impl KeypadPage {
     pub fn max_val(&self) -> u16 {
         match self {
-            Self::AddScore(_) | Self::Penalty(_, _, _) => 99,
+            Self::AddScore(_)
+            | Self::Penalty(_, _, _, _)
+            | Self::FoulAdd { .. }
+            | Self::WarningAdd { .. } => 99,
             Self::GameNumber => 9999,
-            Self::TeamTimeouts(_) => 999,
+            Self::TeamTimeouts(_, _) => 999,
         }
     }
 
     pub fn text(&self) -> &'static str {
         match self {
-            Self::AddScore(_) | Self::Penalty(_, _, _) => "PLAYER\nNUMBER:",
+            Self::AddScore(_)
+            | Self::Penalty(_, _, _, _)
+            | Self::FoulAdd { .. }
+            | Self::WarningAdd { .. } => "PLAYER\nNUMBER:",
             Self::GameNumber => "GAME\nNUMBER:",
-            Self::TeamTimeouts(_) => "NUM T/Os\nPER HALF:",
+            Self::TeamTimeouts(_, true) => "NUM T/Os\nPER HALF:",
+            Self::TeamTimeouts(_, false) => "NUM T/Os\nPER GAME:",
         }
     }
 }

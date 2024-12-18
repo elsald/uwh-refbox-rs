@@ -7,7 +7,7 @@ use core::{
     task::{Context, Poll},
 };
 use derivative::Derivative;
-use enum_derive_2018::EnumDisplay;
+use enum_derive_2018::{EnumDisplay, EnumFromStr};
 #[cfg(target_os = "linux")]
 use futures_lite::future::FutureExt;
 use log::*;
@@ -29,8 +29,10 @@ use tokio::{
     task::{self, JoinHandle},
     time::{sleep, Duration},
 };
+use toml::Table;
 use web_audio_api::{
     context::{AudioContext, AudioContextOptions, BaseAudioContext},
+    media_devices,
     node::{
         AudioBufferSourceNode, AudioNode, AudioScheduledSourceNode, ChannelInterpretation,
         ChannelMergerNode, GainNode,
@@ -77,8 +79,101 @@ pub struct SoundSettings {
     pub remotes: Vec<RemoteInfo>,
 }
 
+impl SoundSettings {
+    pub fn migrate(old: &Table) -> Self {
+        let Self {
+            mut sound_enabled,
+            mut whistle_enabled,
+            mut buzzer_sound,
+            mut whistle_vol,
+            mut above_water_vol,
+            mut under_water_vol,
+            mut auto_sound_start_play,
+            mut auto_sound_stop_play,
+            mut remotes,
+        } = Default::default();
+
+        if let Some(old_sound_enabled) = old.get("sound_enabled") {
+            if let Some(old_sound_enabled) = old_sound_enabled.as_bool() {
+                sound_enabled = old_sound_enabled;
+            }
+        }
+        if let Some(old_whistle_enabled) = old.get("whistle_enabled") {
+            if let Some(old_whistle_enabled) = old_whistle_enabled.as_bool() {
+                whistle_enabled = old_whistle_enabled;
+            }
+        }
+        if let Some(old_buzzer_sound) = old.get("buzzer_sound") {
+            if let Some(old_buzzer_sound) = old_buzzer_sound.as_str() {
+                if let Ok(sound) = old_buzzer_sound.parse() {
+                    buzzer_sound = sound;
+                }
+            }
+        }
+        if let Some(old_whistle_vol) = old.get("whistle_vol") {
+            if let Some(old_whistle_vol) = old_whistle_vol.as_str() {
+                if let Ok(vol) = old_whistle_vol.parse() {
+                    whistle_vol = vol;
+                }
+            }
+        }
+        if let Some(old_above_water_vol) = old.get("above_water_vol") {
+            if let Some(old_above_water_vol) = old_above_water_vol.as_str() {
+                if let Ok(vol) = old_above_water_vol.parse() {
+                    above_water_vol = vol;
+                }
+            }
+        }
+        if let Some(old_under_water_vol) = old.get("under_water_vol") {
+            if let Some(old_under_water_vol) = old_under_water_vol.as_str() {
+                if let Ok(vol) = old_under_water_vol.parse() {
+                    under_water_vol = vol;
+                }
+            }
+        }
+        if let Some(old_auto_sound_start_play) = old.get("auto_sound_start_play") {
+            if let Some(old_auto_sound_start_play) = old_auto_sound_start_play.as_bool() {
+                auto_sound_start_play = old_auto_sound_start_play;
+            }
+        }
+        if let Some(old_auto_sound_stop_play) = old.get("auto_sound_stop_play") {
+            if let Some(old_auto_sound_stop_play) = old_auto_sound_stop_play.as_bool() {
+                auto_sound_stop_play = old_auto_sound_stop_play;
+            }
+        }
+        if let Some(old_remotes) = old.get("remotes") {
+            if let Some(old_remotes) = old_remotes.as_array() {
+                remotes = old_remotes
+                    .iter()
+                    .filter_map(|r| {
+                        if let Some(r) = r.as_table() {
+                            let id = r.get("id")?.as_integer()? as u32;
+                            let sound = r.get("sound")?.as_str()?.parse().ok();
+                            Some(RemoteInfo { id, sound })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
+        }
+
+        Self {
+            sound_enabled,
+            whistle_enabled,
+            buzzer_sound,
+            whistle_vol,
+            above_water_vol,
+            under_water_vol,
+            auto_sound_start_play,
+            auto_sound_stop_play,
+            remotes,
+        }
+    }
+}
+
 macro_attr! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Derivative, EnumDisplay!)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Derivative, EnumDisplay!, EnumFromStr!)]
     #[derivative(Default)]
     pub enum Volume {
         Off,
@@ -138,12 +233,19 @@ impl SoundController {
             + Fn() -> Result<(), tokio::sync::mpsc::error::TrySendError<ServerMessage>>
             + 'static,
     {
+        let available_devices = media_devices::enumerate_devices_sync();
+
+        info!("Available audio devices:\n{:#?}", available_devices);
+
         let opts = AudioContextOptions {
             sample_rate: Some(SAMPLE_RATE),
             ..AudioContextOptions::default()
         };
 
-        let context = Arc::new(AudioContext::new(opts));
+        let context = AudioContext::new(opts);
+        info!("Audio context created with sink {:?}", context.sink_id());
+
+        let context = Arc::new(context);
 
         let library = SoundLibrary::new(&context);
 
@@ -233,18 +335,23 @@ impl SoundController {
             let mut ant_pin = gpio.get(16).unwrap().into_input_pullup();
             let (ant_tx, mut ant_rx) = unbounded_channel();
             ant_pin
-                .set_async_interrupt(Trigger::Both, move |level| {
-                    ant_tx.send((level, Instant::now())).unwrap()
+                .set_async_interrupt(Trigger::Both, None, move |event| {
+                    ant_tx.send((event.trigger, Instant::now())).unwrap()
                 })
                 .unwrap();
 
             let mut wired_pin = gpio.get(12).unwrap().into_input_pullup();
             let (wired_tx, mut wired_rx) = unbounded_channel();
             wired_pin
-                .set_async_interrupt(Trigger::Both, move |level| wired_tx.send(level).unwrap())
+                .set_async_interrupt(Trigger::Both, None, move |event| {
+                    wired_tx.send(event.trigger).unwrap()
+                })
                 .unwrap();
 
-            let ant_start_state = ant_pin.read();
+            let ant_start_state = match ant_pin.read() {
+                Level::Low => Trigger::FallingEdge,
+                Level::High => Trigger::RisingEdge,
+            };
 
             let (wireless_tx, mut wireless_rx) = unbounded_channel();
             let (remote_id_tx, mut remote_id_rx) = watch::channel(0);
@@ -256,7 +363,7 @@ impl SoundController {
                 let mut state = RemoteDetectorState {
                     preamble_detected: false,
                     bits: vec![],
-                    last_pin_state: ant_start_state,
+                    last_pin_edge: ant_start_state,
                     last_edge_time: Instant::now(),
                     last_pulse: None,
                 };
@@ -265,11 +372,11 @@ impl SoundController {
                     tokio::select! {
                         pin_update = ant_rx.recv() => {
                             match pin_update {
-                                Some((l @ Level::High, now)) => {
-                                    if state.last_pin_state != l {
+                                Some((l @ Trigger::RisingEdge, now)) => {
+                                    if state.last_pin_edge != l {
                                         let pulse = now.duration_since(state.last_edge_time).as_micros();
                                         trace!("Detected LOW  pulse {pulse:>5}us long");
-                                        state.last_pin_state = l;
+                                        state.last_pin_edge = l;
                                         state.last_edge_time = now;
 
                                         let maybe_pulse_type = identify_pulse(pulse);
@@ -330,11 +437,11 @@ impl SoundController {
                                         state.last_pulse = maybe_pulse_type;
                                     }
                                 }
-                                Some((l @ Level::Low, now)) => {
-                                    if state.last_pin_state != l {
+                                Some((l @ Trigger::FallingEdge, now)) => {
+                                    if state.last_pin_edge != l {
                                         let pulse = now.duration_since(state.last_edge_time).as_micros();
                                         trace!("Detected HIGH pulse {pulse:>5}us long");
-                                        state.last_pin_state = l;
+                                        state.last_pin_edge = l;
                                         state.last_edge_time = now;
 
                                         let maybe_pulse_type = identify_pulse(pulse);
@@ -349,6 +456,8 @@ impl SoundController {
                                         state.last_pulse = maybe_pulse_type;
                                     }
                                 }
+                                Some((Trigger::Disabled, _))
+                                | Some((Trigger::Both, _)) => panic!("Imposible pin state"),
                                 None => panic!("The Pin has been dropped"),
                             }
                         }
@@ -384,13 +493,15 @@ impl SoundController {
                     tokio::pin!(wireless_expiration);
 
                     tokio::select! {
-                        level = wired_rx.recv() => {
-                            match level {
-                                Some(Level::Low) => wired_pressed = false,
-                                Some(Level::High) => {
+                        event = wired_rx.recv() => {
+                            match event {
+                                Some(Trigger::FallingEdge) => wired_pressed = false,
+                                Some(Trigger::RisingEdge) => {
                                     wired_pressed = true;
                                     sound = None;
                                 }
+                                Some(Trigger::Disabled)
+                                | Some(Trigger::Both) => panic!("Imposible pin state"),
                                 None => break,
                             }
                         }
@@ -546,14 +657,14 @@ impl Sound {
         _merger.connect(&context.destination());
 
         let gain_l = context.create_gain();
-        gain_l.connect_at(&_merger, 0, 0);
+        gain_l.connect_from_output_to_input(&_merger, 0, 0);
         gain_l.gain().set_value(volumes.left);
 
         let gain_r = context.create_gain();
-        gain_r.connect_at(&_merger, 0, 1);
+        gain_r.connect_from_output_to_input(&_merger, 0, 1);
         gain_r.gain().set_value(volumes.right);
 
-        let source = context.create_buffer_source();
+        let mut source = context.create_buffer_source();
         source.set_buffer(buffer);
         source.connect(&gain_l);
         source.connect(&gain_r);
@@ -599,7 +710,7 @@ impl Sound {
         }
     }
 
-    async fn stop(self) {
+    async fn stop(mut self) {
         let fade_end = self.context.current_time() + FADE_LEN;
 
         // Set the gains so that the start of the fade is now, not when the sound started
@@ -640,7 +751,7 @@ const fn identify_pulse(len: u128) -> Option<PulseType> {
 struct RemoteDetectorState {
     preamble_detected: bool,
     bits: Vec<bool>,
-    last_pin_state: Level,
+    last_pin_edge: Trigger,
     last_edge_time: Instant,
     last_pulse: Option<PulseType>,
 }
@@ -668,5 +779,132 @@ impl Future for WirelessTimeout {
             Self::Never(ref mut pend) => pend.poll(cx),
             Self::Time(ref mut slp) => slp.poll(cx),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ser_sound_settings() {
+        let settings: SoundSettings = Default::default();
+        let serialized = toml::to_string(&settings).unwrap();
+        let deser = toml::from_str(&serialized);
+        assert_eq!(deser, Ok(settings));
+    }
+
+    #[test]
+    fn test_ser_volume() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+        struct Test {
+            vol: Volume,
+        }
+
+        let vol = Test { vol: Volume::Off };
+        let serialized = toml::to_string(&vol).unwrap();
+        let deser = toml::from_str(&serialized);
+        assert_eq!(deser, Ok(vol));
+
+        let vol = Test { vol: Volume::Low };
+        let serialized = toml::to_string(&vol).unwrap();
+        let deser = toml::from_str(&serialized);
+        assert_eq!(deser, Ok(vol));
+
+        let vol = Test {
+            vol: Volume::Medium,
+        };
+        let serialized = toml::to_string(&vol).unwrap();
+        let deser = toml::from_str(&serialized);
+        assert_eq!(deser, Ok(vol));
+
+        let vol = Test { vol: Volume::High };
+        let serialized = toml::to_string(&vol).unwrap();
+        let deser = toml::from_str(&serialized);
+        assert_eq!(deser, Ok(vol));
+
+        let vol = Test { vol: Volume::Max };
+        let serialized = toml::to_string(&vol).unwrap();
+        let deser = toml::from_str(&serialized);
+        assert_eq!(deser, Ok(vol));
+    }
+
+    #[test]
+    fn test_migrate_sound_settings() {
+        let mut old = Table::new();
+        old.insert("sound_enabled".to_string(), toml::Value::Boolean(false));
+        old.insert("whistle_enabled".to_string(), toml::Value::Boolean(false));
+        old.insert(
+            "buzzer_sound".to_string(),
+            toml::Value::String("Buzz".to_string()),
+        );
+        old.insert(
+            "whistle_vol".to_string(),
+            toml::Value::String("Low".to_string()),
+        );
+        old.insert(
+            "above_water_vol".to_string(),
+            toml::Value::String("Medium".to_string()),
+        );
+        old.insert(
+            "under_water_vol".to_string(),
+            toml::Value::String("Medium".to_string()),
+        );
+        old.insert(
+            "auto_sound_start_play".to_string(),
+            toml::Value::Boolean(false),
+        );
+        old.insert(
+            "auto_sound_stop_play".to_string(),
+            toml::Value::Boolean(false),
+        );
+        old.insert(
+            "remotes".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::Table(
+                    vec![
+                        ("id".to_string(), toml::Value::Integer(1)),
+                        ("sound".to_string(), toml::Value::String("Buzz".to_string())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                toml::Value::Table(
+                    vec![
+                        ("id".to_string(), toml::Value::Integer(2)),
+                        (
+                            "sound".to_string(),
+                            toml::Value::String("DeDeDu".to_string()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ]),
+        );
+
+        let settings = SoundSettings::migrate(&old);
+
+        assert_eq!(settings.sound_enabled, false);
+        assert_eq!(settings.whistle_enabled, false);
+        assert_eq!(settings.buzzer_sound, BuzzerSound::Buzz);
+        assert_eq!(settings.whistle_vol, Volume::Low);
+        assert_eq!(settings.above_water_vol, Volume::Medium);
+        assert_eq!(settings.under_water_vol, Volume::Medium);
+        assert_eq!(settings.auto_sound_start_play, false);
+        assert_eq!(settings.auto_sound_stop_play, false);
+        assert_eq!(
+            settings.remotes,
+            vec![
+                RemoteInfo {
+                    id: 1,
+                    sound: Some(BuzzerSound::Buzz),
+                },
+                RemoteInfo {
+                    id: 2,
+                    sound: Some(BuzzerSound::DeDeDu),
+                },
+            ]
+        );
     }
 }

@@ -1,11 +1,11 @@
 use super::{
-    style::{self, MIN_BUTTON_SIZE, PADDING, SPACING},
+    style::{ButtonStyle, ContainerStyle, Element, LINE_HEIGHT, MIN_BUTTON_SIZE, PADDING, SPACING},
     *,
 };
 use collect_array::CollectArrayResult;
 use iced::{
     alignment::{Horizontal, Vertical},
-    pure::{button, column, horizontal_space, row, text, vertical_space, Element},
+    widget::{button, column, horizontal_space, row, text, vertical_space},
     Length,
 };
 
@@ -17,6 +17,8 @@ pub(in super::super) fn build_list_selector_page<'a>(
     index: usize,
     settings: &EditableSettings,
     tournaments: &Option<BTreeMap<u32, TournamentInfo>>,
+    mode: Mode,
+    clock_running: bool,
 ) -> Element<'a, Message> {
     const LIST_LEN: usize = 4;
     const TEAM_NAME_LEN_LIMIT: usize = 15;
@@ -28,6 +30,7 @@ pub(in super::super) fn build_list_selector_page<'a>(
     };
 
     let title = text(title)
+        .line_height(LINE_HEIGHT)
         .height(Length::Fill)
         .width(Length::Fill)
         .horizontal_alignment(Horizontal::Center)
@@ -46,22 +49,23 @@ pub(in super::super) fn build_list_selector_page<'a>(
                 .map(|pen| {
                     if let Some((btn_text, msg_val)) = pen {
                         let text = text(btn_text)
+                            .line_height(LINE_HEIGHT)
                             .vertical_alignment(Vertical::Center)
                             .horizontal_alignment(Horizontal::Left)
                             .width(Length::Fill);
 
                         button(text)
                             .padding(PADDING)
-                            .height(Length::Units(MIN_BUTTON_SIZE))
+                            .height(Length::Fixed(MIN_BUTTON_SIZE))
                             .width(Length::Fill)
-                            .style(style::Button::Gray)
+                            .style(ButtonStyle::Gray)
                             .on_press(Message::ParameterSelected(param, msg_val))
                             .into()
                     } else {
                         button(horizontal_space(Length::Shrink))
-                            .height(Length::Units(MIN_BUTTON_SIZE))
+                            .height(Length::Fixed(MIN_BUTTON_SIZE))
                             .width(Length::Fill)
-                            .style(style::Button::Gray)
+                            .style(ButtonStyle::Gray)
                             .into()
                     }
                 })
@@ -107,32 +111,29 @@ pub(in super::super) fn build_list_selector_page<'a>(
         index,
         title,
         ScrollOption::GameParameter,
-        style::Container::LightGray,
+        ContainerStyle::LightGray,
     )
     .width(Length::FillPortion(4));
 
-    column()
+    column![
+        make_game_time_button(snapshot, false, false, mode, clock_running),
+        row![
+            scroll_list,
+            column![
+                vertical_space(Length::Fill),
+                make_button("CANCEL")
+                    .style(ButtonStyle::Red)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(MIN_BUTTON_SIZE))
+                    .on_press(Message::ParameterEditComplete { canceled: true }),
+            ]
+            .width(Length::Fill),
+        ]
         .spacing(SPACING)
         .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .push(scroll_list)
-                .push(
-                    column()
-                        .width(Length::Fill)
-                        .push(vertical_space(Length::Fill))
-                        .push(
-                            make_button("CANCEL")
-                                .style(style::Button::Red)
-                                .width(Length::Fill)
-                                .height(Length::Units(MIN_BUTTON_SIZE))
-                                .on_press(Message::ParameterEditComplete { canceled: true }),
-                        ),
-                ),
-        )
-        .into()
+        .width(Length::Fill),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
 }

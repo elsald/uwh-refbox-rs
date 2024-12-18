@@ -1,11 +1,19 @@
 use super::{
-    style::{self, LARGE_TEXT, MEDIUM_TEXT, MIN_BUTTON_SIZE, PADDING, SPACING},
+    super::Config,
+    style::{
+        Button, ButtonStyle, ContainerStyle, Element, SvgStyle, LARGE_TEXT, LINE_HEIGHT,
+        MEDIUM_TEXT, MIN_BUTTON_SIZE, PADDING, SPACING,
+    },
     *,
 };
 
 use iced::{
     alignment::{Horizontal, Vertical},
-    pure::{column, container, row, text, Element},
+    widget::{
+        button, column, container, row,
+        svg::{self, Svg},
+        text,
+    },
     Alignment, Length,
 };
 
@@ -23,147 +31,167 @@ use game_number_edit::*;
 mod team_timeout_edit;
 use team_timeout_edit::*;
 
+mod foul_add;
+use foul_add::*;
+
+mod warning_add;
+use warning_add::*;
+
 pub(in super::super) fn build_keypad_page<'a>(
     snapshot: &GameSnapshot,
     page: KeypadPage,
     player_num: u16,
+    config: &Config,
+    clock_running: bool,
 ) -> Element<'a, Message> {
-    column()
+    let enabled = match page {
+        KeypadPage::WarningAdd { team_warning, .. } => !team_warning,
+        KeypadPage::FoulAdd { color, .. } => color.is_some(),
+        _ => true,
+    };
+
+    let setup_keypad_button =
+        |button: Button<'a, Message>, message: Message| -> Button<'a, Message> {
+            let button = if enabled {
+                button.on_press(message)
+            } else {
+                button
+            };
+            button.style(ButtonStyle::Blue)
+        };
+
+    column![
+        make_game_time_button(snapshot, false, false, config.mode, clock_running),
+        row![
+            container(
+                column![
+                    row![
+                        text(page.text())
+                            .line_height(LINE_HEIGHT)
+                            .horizontal_alignment(Horizontal::Left)
+                            .vertical_alignment(Vertical::Center),
+                        text(player_num.to_string())
+                            .size(LARGE_TEXT)
+                            .line_height(LINE_HEIGHT)
+                            .width(Length::Fill)
+                            .horizontal_alignment(Horizontal::Right)
+                            .vertical_alignment(Vertical::Center),
+                    ]
+                    .align_items(Alignment::Center)
+                    .height(Length::Fill)
+                    .width(Length::Fixed(3.0 * MIN_BUTTON_SIZE + 2.0 * SPACING)),
+                    row![
+                        setup_keypad_button(
+                            make_small_button("7", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Seven,)
+                        ),
+                        setup_keypad_button(
+                            make_small_button("8", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Eight,)
+                        ),
+                        setup_keypad_button(
+                            make_small_button("9", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Nine,)
+                        ),
+                    ]
+                    .spacing(SPACING),
+                    row![
+                        setup_keypad_button(
+                            make_small_button("4", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Four,)
+                        ),
+                        setup_keypad_button(
+                            make_small_button("5", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Five,)
+                        ),
+                        setup_keypad_button(
+                            make_small_button("6", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Six,)
+                        ),
+                    ]
+                    .spacing(SPACING),
+                    row![
+                        setup_keypad_button(
+                            make_small_button("1", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::One,)
+                        ),
+                        setup_keypad_button(
+                            make_small_button("2", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Two,)
+                        ),
+                        setup_keypad_button(
+                            make_small_button("3", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Three,)
+                        ),
+                    ]
+                    .spacing(SPACING),
+                    row![
+                        setup_keypad_button(
+                            make_small_button("0", MEDIUM_TEXT),
+                            Message::KeypadButtonPress(KeypadButton::Zero,)
+                        ),
+                        setup_keypad_button(
+                            button(
+                                container(
+                                    Svg::new(svg::Handle::from_memory(
+                                        &include_bytes!("../../../../resources/backspace.svg")[..],
+                                    ))
+                                    .style(if enabled {
+                                        SvgStyle::White
+                                    } else {
+                                        SvgStyle::Disabled
+                                    })
+                                    .height(Length::Fixed(MEDIUM_TEXT * 1.2)),
+                                )
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .style(ContainerStyle::Transparent)
+                                .center_x()
+                                .center_y(),
+                            )
+                            .width(Length::Fixed(2.0 * MIN_BUTTON_SIZE + SPACING))
+                            .height(Length::Fixed(MIN_BUTTON_SIZE)),
+                            Message::KeypadButtonPress(KeypadButton::Delete,)
+                        ),
+                    ]
+                    .spacing(SPACING),
+                ]
+                .spacing(SPACING),
+            )
+            .style(if enabled {
+                ContainerStyle::LightGray
+            } else {
+                ContainerStyle::Disabled
+            })
+            .padding(PADDING),
+            match page {
+                KeypadPage::AddScore(color) => make_score_add_page(color),
+                KeypadPage::Penalty(origin, color, kind, foul) => {
+                    make_penalty_edit_page(origin, color, kind, config, foul)
+                }
+                KeypadPage::GameNumber => make_game_number_edit_page(),
+                KeypadPage::TeamTimeouts(dur, per_half) =>
+                    make_team_timeout_edit_page(dur, per_half),
+                KeypadPage::FoulAdd {
+                    origin,
+                    color,
+                    infraction,
+                    ret_to_overview,
+                } => make_foul_add_page(origin, color, infraction, ret_to_overview),
+                KeypadPage::WarningAdd {
+                    origin,
+                    color,
+                    infraction,
+                    team_warning,
+                    ret_to_overview,
+                } =>
+                    make_warning_add_page(origin, color, infraction, team_warning, ret_to_overview),
+            }
+        ]
         .spacing(SPACING)
-        .height(Length::Fill)
-        .push(make_game_time_button(snapshot, false, true).on_press(Message::EditTime))
-        .push(
-            row()
-                .spacing(SPACING)
-                .height(Length::Fill)
-                .push(
-                    container(
-                        column()
-                            .spacing(SPACING)
-                            .push(
-                                row()
-                                    .align_items(Alignment::Center)
-                                    .height(Length::Fill)
-                                    .width(Length::Units(3 * MIN_BUTTON_SIZE + 2 * SPACING))
-                                    .push(
-                                        text(page.text())
-                                            .horizontal_alignment(Horizontal::Left)
-                                            .vertical_alignment(Vertical::Center),
-                                    )
-                                    .push(
-                                        text(player_num.to_string())
-                                            .size(LARGE_TEXT)
-                                            .width(Length::Fill)
-                                            .horizontal_alignment(Horizontal::Right)
-                                            .vertical_alignment(Vertical::Center),
-                                    ),
-                            )
-                            .push(
-                                row()
-                                    .spacing(SPACING)
-                                    .push(
-                                        make_small_button("7", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Seven,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("8", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Eight,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("9", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Nine,
-                                            )),
-                                    ),
-                            )
-                            .push(
-                                row()
-                                    .spacing(SPACING)
-                                    .push(
-                                        make_small_button("4", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Four,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("5", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Five,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("6", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Six,
-                                            )),
-                                    ),
-                            )
-                            .push(
-                                row()
-                                    .spacing(SPACING)
-                                    .push(
-                                        make_small_button("1", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::One,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("2", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Two,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("3", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Three,
-                                            )),
-                                    ),
-                            )
-                            .push(
-                                row()
-                                    .spacing(SPACING)
-                                    .push(
-                                        make_small_button("0", MEDIUM_TEXT)
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Zero,
-                                            )),
-                                    )
-                                    .push(
-                                        make_small_button("\u{232b}", LARGE_TEXT)
-                                            .width(Length::Units(2 * MIN_BUTTON_SIZE + SPACING))
-                                            .style(style::Button::Blue)
-                                            .on_press(Message::KeypadButtonPress(
-                                                KeypadButton::Delete,
-                                            )),
-                                    ),
-                            ),
-                    )
-                    .style(style::Container::LightGray)
-                    .padding(PADDING),
-                )
-                .push(match page {
-                    KeypadPage::AddScore(color) => make_score_add_page(color),
-                    KeypadPage::Penalty(origin, color, kind) => {
-                        make_penalty_edit_page(origin, color, kind)
-                    }
-                    KeypadPage::GameNumber => make_game_number_edit_page(),
-                    KeypadPage::TeamTimeouts(dur) => make_team_timeout_edit_page(dur),
-                }),
-        )
-        .into()
+        .height(Length::Fill),
+    ]
+    .spacing(SPACING)
+    .height(Length::Fill)
+    .into()
 }

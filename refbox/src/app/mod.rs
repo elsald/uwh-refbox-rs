@@ -1,20 +1,25 @@
+use self::infraction::InfractionDetails;
+
 use super::APP_NAME;
-use crate::{config::Config, penalty_editor::*, sound_controller::*, tournament_manager::*};
-use iced::{
-    executor,
-    pure::{column, Application, Element},
-    Command, Subscription,
+use crate::{
+    config::{Config, Mode},
+    penalty_editor::*,
+    sound_controller::*,
+    tournament_manager::{penalty::*, *},
 };
+use iced::{executor, widget::column, Application, Command, Subscription};
 use iced_futures::{
     futures::stream::{self, BoxStream},
-    subscription::Recipe,
+    subscription::{EventStream, Recipe},
 };
+use iced_runtime::{command, window};
 use log::*;
 use reqwest::{Client, Method, StatusCode};
 use std::{
+    borrow::Cow,
     cmp::min,
     collections::BTreeMap,
-    hash::Hasher,
+    pin::Pin,
     process::Child,
     sync::{Arc, Mutex},
 };
@@ -27,7 +32,8 @@ use tokio_serial::SerialPortBuilder;
 use uwh_common::{
     config::Game as GameConfig,
     drawing_support::*,
-    game_snapshot::{Color as GameColor, GamePeriod, GameSnapshot, TimeoutSnapshot},
+    game_snapshot::{Color, GamePeriod, GameSnapshot, Infraction, TimeoutSnapshot},
+    uwhportal::UwhPortalClient,
     uwhscores::*,
 };
 
@@ -38,7 +44,7 @@ mod message;
 use message::*;
 
 pub mod style;
-use style::{PADDING, SPACING, WINDOW_BACKGROUND};
+use style::{PADDING, SPACING};
 
 pub mod update_sender;
 use update_sender::*;
@@ -46,13 +52,17 @@ use update_sender::*;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RETRIES: usize = 6;
 
+pub type Element<'a, Message> = iced::Element<'a, Message, iced::Renderer<style::ApplicationTheme>>;
+
 pub struct RefBoxApp {
     tm: Arc<Mutex<TournamentManager>>,
     config: Config,
     edited_settings: Option<EditableSettings>,
     snapshot: GameSnapshot,
     time_updater: TimeUpdater,
-    pen_edit: PenaltyEditor,
+    pen_edit: ListEditor<Penalty, Color>,
+    warn_edit: ListEditor<InfractionDetails, Color>,
+    foul_edit: ListEditor<InfractionDetails, Option<Color>>,
     app_state: AppState,
     last_app_state: AppState,
     last_message: Message,
@@ -60,6 +70,9 @@ pub struct RefBoxApp {
     message_listener: MessageListener,
     msg_tx: mpsc::UnboundedSender<Message>,
     client: Option<Client>,
+    uwhscores_token: Arc<Mutex<Option<String>>>,
+    uwhscores_auth_valid_for: Option<Vec<u32>>,
+    uwhportal_client: Option<UwhPortalClient>,
     using_uwhscores: bool,
     tournaments: Option<BTreeMap<u32, TournamentInfo>>,
     games: Option<BTreeMap<u32, GameInfo>>,
@@ -69,6 +82,7 @@ pub struct RefBoxApp {
     sim_child: Option<Child>,
     fullscreen: bool,
     list_all_tournaments: bool,
+    touchscreen: bool,
 }
 
 #[derive(Debug)]
@@ -81,6 +95,7 @@ pub struct RefBoxAppFlags {
     pub require_https: bool,
     pub fullscreen: bool,
     pub list_all_tournaments: bool,
+    pub touchscreen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +107,11 @@ enum AppState {
         is_confirmation: bool,
     },
     PenaltyOverview(BlackWhiteBundle<usize>),
+    WarningOverview(BlackWhiteBundle<usize>),
+    FoulOverview(OptColorBundle<usize>),
     KeypadPage(KeypadPage, u16),
+    GameDetailsPage,
+    WarningsSummaryPage,
     EditGameConfig(ConfigPage),
     ParameterEditor(LengthParameter, Duration),
     ParameterList(ListableParameter, usize),
@@ -112,7 +131,7 @@ impl RefBoxApp {
     fn apply_snapshot(&mut self, mut new_snapshot: GameSnapshot) {
         if new_snapshot.current_period != self.snapshot.current_period {
             if new_snapshot.current_period == GamePeriod::BetweenGames {
-                self.handle_game_end(new_snapshot.next_game_number);
+                self.handle_game_end(new_snapshot.game_number, new_snapshot.next_game_number);
             } else if self.snapshot.current_period == GamePeriod::BetweenGames {
                 self.handle_game_start(new_snapshot.game_number);
             }
@@ -188,14 +207,25 @@ impl RefBoxApp {
         }
     }
 
-    fn do_get_request<T, F>(&self, url: String, short_name: String, on_success: F)
-    where
+    fn do_get_request<T, F>(
+        &self,
+        url: String,
+        short_name: String,
+        on_success: F,
+        on_error: Option<Message>,
+    ) where
         T: serde::de::DeserializeOwned,
         F: Fn(T) -> Message + Send + Sync + 'static,
     {
         if let Some(client) = &self.client {
             info!("Starting request for {short_name}");
-            let request = client.request(Method::GET, url).build().unwrap();
+            let mut request = client.request(Method::GET, url);
+            if let Some(token) = self.uwhscores_token.lock().unwrap().as_deref() {
+                if !token.is_empty() {
+                    request = request.basic_auth::<_, String>(token.to_string(), None);
+                }
+            }
+            let request = request.build().unwrap();
             let client_ = client.clone();
             let msg_tx_ = self.msg_tx.clone();
 
@@ -243,6 +273,9 @@ impl RefBoxApp {
                     msg_tx_.send(msg).unwrap();
                 } else {
                     error!("Too many failures when requesting {short_name}, stopping");
+                    if let Some(on_error) = on_error {
+                        msg_tx_.send(on_error).unwrap();
+                    }
                 }
             });
         }
@@ -254,6 +287,7 @@ impl RefBoxApp {
             url,
             "tournament list".to_string(),
             |parsed: TournamentListResponse| Message::RecvTournamentList(parsed.tournaments),
+            None,
         );
     }
 
@@ -263,6 +297,7 @@ impl RefBoxApp {
             url,
             format!("tournament details for tid {tid}"),
             |parsed: TournamentSingleResponse| Message::RecvTournament(parsed.tournament),
+            None,
         );
     }
 
@@ -272,6 +307,7 @@ impl RefBoxApp {
             url,
             format!("game list for tid {tid}"),
             |parsed: GameListResponse| Message::RecvGameList(parsed.games),
+            None,
         );
     }
 
@@ -281,7 +317,64 @@ impl RefBoxApp {
             url,
             format!("game deatils for tid {tid} and gid {gid}"),
             |parsed: GameSingleResponse| Message::RecvGame(parsed.game),
+            None,
         );
+    }
+
+    fn uwhscores_login(&self) -> Option<Pin<Box<impl std::future::Future<Output = ()>>>> {
+        if let Some(client) = &self.client {
+            let client_ = client.clone();
+            let login_request = client_
+                .request(Method::GET, format!("{}login", self.config.uwhscores.url))
+                .basic_auth(
+                    self.config.uwhscores.email.clone(),
+                    Some(self.config.uwhscores.password.clone()),
+                )
+                .build()
+                .unwrap();
+
+            let uwhscores_token = self.uwhscores_token.clone();
+            Some(Box::pin(async move {
+                info!("Starting login request");
+
+                for _ in 0..MAX_RETRIES {
+                    match client_.execute(login_request.try_clone().unwrap()).await {
+                        Ok(resp) => {
+                            if resp.status() != StatusCode::OK {
+                                error!(
+                                    "Got bad status code from uwhscores when logging in: {}",
+                                    resp.status()
+                                );
+                                info!("Maybe retrying");
+                                *uwhscores_token.lock().unwrap() = Some(String::new());
+                                continue;
+                            } else {
+                                match resp.json::<LoginResponse>().await {
+                                    Ok(parsed) => {
+                                        info!("Successfully logged in to uwhscores");
+                                        *uwhscores_token.lock().unwrap() = Some(parsed.token);
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        error!("Couldn't deserialize login: {e}");
+                                        *uwhscores_token.lock().unwrap() = Some(String::new());
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Login request failed: {e}");
+                            info!("Maybe retrying");
+                            *uwhscores_token.lock().unwrap() = Some(String::new());
+                            continue;
+                        }
+                    };
+                }
+            }))
+        } else {
+            None
+        }
     }
 
     fn post_game_score(&self, game: &GameInfo, scores: BlackWhiteBundle<u8>) {
@@ -290,16 +383,8 @@ impl RefBoxApp {
             let gid = game.gid;
             let post_url = format!("{}tournaments/{tid}/games/{gid}", self.config.uwhscores.url);
 
-            info!("Starting login request");
-
-            let login_request = client
-                .request(Method::GET, format!("{}login", self.config.uwhscores.url))
-                .basic_auth(
-                    self.config.uwhscores.email.clone(),
-                    Some(self.config.uwhscores.password.clone()),
-                )
-                .build()
-                .unwrap();
+            let login_request = self.uwhscores_login().unwrap();
+            let mut login_request_2 = Some(self.uwhscores_login().unwrap());
 
             let post_data = GameScorePostData::new(GameScoreInfo {
                 tid,
@@ -310,58 +395,64 @@ impl RefBoxApp {
                 white_id: game.white_id,
             });
 
-            let client_ = client.clone();
-            task::spawn(async move {
-                let mut login = None;
-                for _ in 0..MAX_RETRIES {
-                    login = match client_.execute(login_request.try_clone().unwrap()).await {
-                        Ok(resp) => {
-                            if resp.status() != StatusCode::OK {
-                                error!(
-                                    "Got bad status code from uwhscores when logging in: {}",
-                                    resp.status()
-                                );
-                                info!("Maybe retrying");
-                                continue;
-                            } else {
-                                match resp.json::<LoginResponse>().await {
-                                    Ok(parsed) => Some(parsed),
-                                    Err(e) => {
-                                        error!("Couldn't desesrialize login: {e}");
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Login request failed: {e}");
-                            info!("Maybe retrying");
-                            continue;
-                        }
-                    };
-                    break;
-                }
+            let post_request = client
+                .request(Method::POST, post_url.clone())
+                .json(&post_data);
 
-                let login = if let Some(l) = login {
-                    l
-                } else {
-                    error!("Too many failures when logging in to uwhscores, stopping");
-                    return;
+            let client_ = client.clone();
+            let uwhscores_token = self.uwhscores_token.clone();
+            task::spawn(async move {
+                let token = uwhscores_token.lock().unwrap().clone();
+
+                let mut token = match token {
+                    Some(t) if !t.is_empty() => t,
+                    _ => {
+                        login_request.await;
+                        if let Some(t) = uwhscores_token.lock().unwrap().as_deref() {
+                            t.to_string()
+                        } else {
+                            error!(
+                                "Failed to get uwhscores token. Aborting post score: {post_data:?}"
+                            );
+                            return;
+                        }
+                    }
                 };
 
                 info!("Posting score: {post_data:?}");
 
-                let post_request = client_
-                    .request(Method::POST, post_url)
-                    .basic_auth::<_, String>(login.token, None)
-                    .json(&post_data)
-                    .build()
-                    .unwrap();
-
                 for _ in 0..MAX_RETRIES {
-                    match client_.execute(post_request.try_clone().unwrap()).await {
-                        Ok(resp) => {
-                            if resp.status() != StatusCode::OK {
+                    let request = post_request
+                        .try_clone()
+                        .unwrap()
+                        .basic_auth::<_, String>(token.clone(), None)
+                        .build()
+                        .unwrap();
+
+                    match client_.execute(request).await {
+                        Ok(resp) => match resp.status() {
+                            StatusCode::OK => {
+                                info!("Successfully posted score");
+                                return;
+                            }
+                            StatusCode::UNAUTHORIZED => {
+                                error!("Got unauthorized status code from uwhscores when posting score: {}",
+                                    resp.status());
+                                info!("Maybe retrying");
+                                if let Some(f) = login_request_2.take() {
+                                    f.await;
+                                }
+                                token = if let Some(token) =
+                                    uwhscores_token.lock().unwrap().as_deref()
+                                {
+                                    token.to_string()
+                                } else {
+                                    error!("Failed to get uwhscores token. Aborting post score: {post_data:?}");
+                                    return;
+                                };
+                                continue;
+                            }
+                            _ => {
                                 error!(
                                     "Got bad status code from uwhscores when posting score: {}",
                                     resp.status()
@@ -369,14 +460,141 @@ impl RefBoxApp {
                                 info!("Maybe retrying");
                                 continue;
                             }
-                        }
+                        },
                         Err(e) => {
                             error!("Post score request failed: {e}");
                             info!("Maybe retrying");
                             continue;
                         }
                     };
+                }
+            });
+        }
+    }
+
+    fn check_uwhscores_auth(&self) {
+        if let Some(client) = &self.client {
+            info!("Starting request for uwhscores auth");
+
+            let login_request = self.uwhscores_login().unwrap();
+            let mut login_request_2 = Some(self.uwhscores_login().unwrap());
+
+            let user_request = client.request(
+                Method::GET,
+                format!("{}users/me", self.config.uwhscores.url),
+            );
+            let client_ = client.clone();
+            let uwhscores_token = self.uwhscores_token.clone();
+            let msg_tx_ = self.msg_tx.clone();
+
+            let mut delay_until = None;
+
+            task::spawn(async move {
+                let token = uwhscores_token.lock().unwrap().clone();
+
+                let mut token = match token {
+                    Some(t) if !t.is_empty() => t,
+                    _ => {
+                        login_request.await;
+                        if let Some(t) = uwhscores_token.lock().unwrap().as_deref() {
+                            t.to_string()
+                        } else {
+                            error!("Failed to get uwhscores token. Aborting uwhscores auth check");
+                            return;
+                        }
+                    }
+                };
+
+                for _ in 0..MAX_RETRIES {
+                    if let Some(time) = delay_until.take() {
+                        sleep_until(time).await;
+                    }
+
+                    let request = user_request
+                        .try_clone()
+                        .unwrap()
+                        .basic_auth::<_, String>(token.clone(), None)
+                        .build()
+                        .unwrap();
+
+                    let start = Instant::now();
+                    match client_.execute(request).await {
+                        Ok(resp) => match resp.status() {
+                            StatusCode::OK => match resp.json::<UserResponse>().await {
+                                Ok(parsed) => {
+                                    msg_tx_
+                                        .send(Message::UwhScoresAuthChecked(
+                                            parsed.user.tournaments,
+                                        ))
+                                        .unwrap();
+                                    return;
+                                }
+                                Err(e) => {
+                                    error!("Couldn't desesrialize uwhscores auth: {e}");
+                                }
+                            },
+                            StatusCode::UNAUTHORIZED => {
+                                error!("Got unauthorized status code from uwhscores when requesting uwhscores auth: {}",
+                                    resp.status());
+                                info!("Maybe retrying");
+                                if let Some(f) = login_request_2.take() {
+                                    f.await;
+                                }
+                                token = if let Some(token) =
+                                    uwhscores_token.lock().unwrap().as_deref()
+                                {
+                                    token.to_string()
+                                } else {
+                                    error!("Failed to get uwhscores token. Aborting uwhscores auth check");
+                                    msg_tx_.send(Message::UwhScoresAuthChecked(vec![])).unwrap();
+                                    return;
+                                };
+                                continue;
+                            }
+                            _ => {
+                                error!(
+                                    "Got bad status code from uwhscores when requesting uwhscores auth: {}",
+                                    resp.status()
+                                );
+                                info!("Maybe retrying");
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            error!("Request for uwhscores auth failed: {e}");
+                            info!("Maybe retrying");
+                            delay_until = Some(start + REQUEST_TIMEOUT);
+                            continue;
+                        }
+                    };
                     break;
+                }
+
+                error!("Too many failures when requesting uwhscores auth, stopping");
+                msg_tx_.send(Message::UwhScoresAuthChecked(vec![])).unwrap();
+            });
+        }
+    }
+
+    fn check_uwhportal_auth(&self) {
+        if let Some(ref uwhportal_client) = self.uwhportal_client {
+            let request = uwhportal_client.verify_token();
+            tokio::spawn(async move {
+                match request.await {
+                    Ok(()) => info!("Successfully checked uwhportal token validity"),
+                    Err(e) => error!("Failed to check uwhportal token validity: {e}"),
+                }
+            });
+        }
+    }
+
+    fn post_game_stats(&self, tid: u32, gid: u32, stats: String) {
+        if let Some(ref uwhportal_client) = self.uwhportal_client {
+            let request = uwhportal_client.post_game_stats(tid, gid, stats);
+            tokio::spawn(async move {
+                match request.await {
+                    Ok(()) => info!("Successfully posted game stats"),
+                    Err(e) => error!("Failed to post game stats: {e}"),
                 }
             });
         }
@@ -415,13 +633,69 @@ impl RefBoxApp {
         }
     }
 
-    fn handle_game_end(&self, next_game_num: u32) {
+    fn handle_game_end(&self, game_number: u32, next_game_num: u32) {
         if self.using_uwhscores {
+            let mut stats = self
+                .tm
+                .lock()
+                .unwrap()
+                .last_game_stats()
+                .map(|s| s.as_json());
+
+            if let Some(ref stats) = stats {
+                info!("Game ended, stats were: {:?}", stats);
+            } else {
+                warn!("Game ended, but no stats were available");
+            }
+
             if let Some(tid) = self.current_tid {
                 self.request_game_details(tid, next_game_num);
+                if let Some(stats) = stats.take() {
+                    self.post_game_stats(tid, game_number, stats);
+                }
             } else {
-                error!("Missing current tid to request game info");
+                error!("Missing current tid to handle game end");
             }
+        }
+    }
+
+    fn apply_settings_change(&mut self) {
+        let edited_settings = self.edited_settings.take().unwrap();
+
+        let EditableSettings {
+            white_on_right,
+            using_uwhscores,
+            current_tid,
+            current_pool,
+            games,
+            sound,
+            mode,
+            collect_scorer_cap_num,
+            hide_time,
+            config: _config,
+            game_number: _game_number,
+            track_fouls_and_warnings,
+            uwhscores_email: _,
+            uwhscores_password: _,
+            uwhportal_token: _,
+        } = edited_settings;
+
+        self.config.hardware.white_on_right = white_on_right;
+        self.using_uwhscores = using_uwhscores;
+        self.current_tid = current_tid;
+        self.current_pool = current_pool;
+        self.games = games;
+        self.config.sound = sound;
+        self.sound.update_settings(self.config.sound.clone());
+        self.config.mode = mode;
+        self.config.collect_scorer_cap_num = collect_scorer_cap_num;
+        self.config.track_fouls_and_warnings = track_fouls_and_warnings;
+
+        if self.config.hide_time != hide_time {
+            self.config.hide_time = hide_time;
+            self.update_sender
+                .set_hide_time(self.config.hide_time)
+                .unwrap();
         }
     }
 }
@@ -438,6 +712,7 @@ impl Drop for RefBoxApp {
 impl Application for RefBoxApp {
     type Executor = executor::Default;
     type Message = Message;
+    type Theme = style::ApplicationTheme;
     type Flags = RefBoxAppFlags;
 
     fn new(flags: Self::Flags) -> (Self, Command<Message>) {
@@ -450,6 +725,7 @@ impl Application for RefBoxApp {
             require_https,
             fullscreen,
             list_all_tournaments,
+            touchscreen,
         } = flags;
 
         let (msg_tx, rx) = mpsc::unbounded_channel();
@@ -474,11 +750,30 @@ impl Application for RefBoxApp {
             }
         };
 
+        let portal_token = if !config.uwhportal.token.is_empty() {
+            Some(config.uwhportal.token.as_str())
+        } else {
+            None
+        };
+        let uwhportal_client = match UwhPortalClient::new(
+            &config.uwhportal.url,
+            portal_token,
+            require_https,
+            REQUEST_TIMEOUT,
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                error!("Failed to start UWH Portal Client: {e}");
+                None
+            }
+        };
+
         let clock_running_receiver = tm.get_start_stop_rx();
 
         let tm = Arc::new(Mutex::new(tm));
 
-        let update_sender = UpdateSender::new(serial_ports, binary_port, json_port);
+        let update_sender =
+            UpdateSender::new(serial_ports, binary_port, json_port, config.hide_time);
 
         let sound =
             SoundController::new(config.sound.clone(), update_sender.get_trigger_flash_fn());
@@ -487,7 +782,9 @@ impl Application for RefBoxApp {
 
         (
             Self {
-                pen_edit: PenaltyEditor::new(tm.clone()),
+                pen_edit: ListEditor::new(tm.clone()),
+                warn_edit: ListEditor::new(tm.clone()),
+                foul_edit: ListEditor::new(tm.clone()),
                 time_updater: TimeUpdater {
                     tm: tm.clone(),
                     clock_running_receiver,
@@ -503,6 +800,9 @@ impl Application for RefBoxApp {
                 message_listener,
                 msg_tx,
                 client,
+                uwhscores_token: Arc::new(Mutex::new(None)),
+                uwhscores_auth_valid_for: None,
+                uwhportal_client,
                 using_uwhscores: false,
                 tournaments: None,
                 games: None,
@@ -512,8 +812,18 @@ impl Application for RefBoxApp {
                 sim_child,
                 fullscreen,
                 list_all_tournaments,
+                touchscreen,
             },
-            Command::none(),
+            Command::single(command::Action::LoadFont {
+                bytes: Cow::from(&include_bytes!("../../resources/Roboto-Medium.ttf")[..]),
+                tagger: Box::new(|res| match res {
+                    Ok(()) => {
+                        info!("Loaded font");
+                        Message::NoAction
+                    }
+                    Err(e) => panic!("Failed to load font: {e:?}"),
+                }),
+            }),
         )
     }
 
@@ -528,14 +838,6 @@ impl Application for RefBoxApp {
         "UWH Ref Box".into()
     }
 
-    fn mode(&self) -> iced::window::Mode {
-        if self.fullscreen {
-            iced::window::Mode::Fullscreen
-        } else {
-            iced::window::Mode::Windowed
-        }
-    }
-
     fn update(&mut self, message: Message) -> Command<Message> {
         trace!("Handling message: {message:?}");
 
@@ -547,8 +849,20 @@ impl Application for RefBoxApp {
             self.last_message = message.clone();
         }
 
+        let command = if matches!(message, Message::Init) && self.fullscreen {
+            Command::single(command::Action::Window(window::Action::ChangeMode(
+                iced_core::window::Mode::Fullscreen,
+            )))
+        } else {
+            Command::none()
+        };
+
         match message {
-            Message::Init => self.request_tournament_list(),
+            Message::Init => {
+                self.request_tournament_list();
+                self.check_uwhscores_auth();
+                self.check_uwhportal_auth();
+            }
             Message::NewSnapshot(snapshot) => {
                 self.apply_snapshot(snapshot);
             }
@@ -579,7 +893,9 @@ impl Application for RefBoxApp {
                         }
                     }
                     AppState::ParameterEditor(_, ref mut dur) => (dur, false),
-                    AppState::KeypadPage(KeypadPage::TeamTimeouts(ref mut dur), _) => (dur, false),
+                    AppState::KeypadPage(KeypadPage::TeamTimeouts(ref mut dur, _), _) => {
+                        (dur, false)
+                    }
                     _ => unreachable!(),
                 };
                 if increase {
@@ -602,6 +918,7 @@ impl Application for RefBoxApp {
             Message::TimeEditComplete { canceled } => {
                 if let AppState::TimeEdit(was_running, game_time, timeout_time) = self.app_state {
                     let mut tm = self.tm.lock().unwrap();
+                    let now = Instant::now();
                     if !canceled {
                         tm.set_game_clock_time(game_time).unwrap();
                         if let Some(time) = timeout_time {
@@ -609,10 +926,12 @@ impl Application for RefBoxApp {
                         }
                     }
                     if was_running {
-                        let now = Instant::now();
                         tm.start_clock(now);
                         tm.update(now).unwrap();
                     }
+                    let snapshot = tm.generate_snapshot(now).unwrap();
+                    drop(tm);
+                    self.apply_snapshot(snapshot);
                     self.app_state = self.last_app_state.clone();
                     trace!("AppState changed to {:?}", self.app_state);
                 } else {
@@ -630,14 +949,25 @@ impl Application for RefBoxApp {
             Message::EditScores => {
                 let tm = self.tm.lock().unwrap();
                 self.app_state = AppState::ScoreEdit {
-                    scores: BlackWhiteBundle {
-                        black: tm.get_b_score(),
-                        white: tm.get_w_score(),
-                    },
+                    scores: tm.get_scores(),
                     is_confirmation: false,
                 };
                 trace!("AppState changed to {:?}", self.app_state);
             }
+            Message::AddNewScore(color) => {
+                if self.config.collect_scorer_cap_num {
+                    self.app_state = AppState::KeypadPage(KeypadPage::AddScore(color), 0);
+                    trace!("AppState changed to {:?}", self.app_state);
+                } else {
+                    let mut tm = self.tm.lock().unwrap();
+                    let now = Instant::now();
+                    tm.add_score(color, 0, now);
+                    let snapshot = tm.generate_snapshot(now).unwrap(); // TODO: Remove this unwrap
+                    std::mem::drop(tm);
+                    self.apply_snapshot(snapshot);
+                }
+            }
+
             Message::ChangeScore { color, increase } => {
                 if let AppState::ScoreEdit { ref mut scores, .. } = self.app_state {
                     if increase {
@@ -668,7 +998,7 @@ impl Application for RefBoxApp {
                             self.post_game_score(game, scores);
                         }
 
-                        tm.set_scores(scores.black, scores.white, now);
+                        tm.set_scores(scores, now);
                         tm.start_clock(now);
 
                         // Update `tm` after game ends to get into Between Games
@@ -682,7 +1012,7 @@ impl Application for RefBoxApp {
                             tm.stop_clock(now).unwrap();
                             AppState::ConfirmScores(scores)
                         } else {
-                            tm.set_scores(scores.black, scores.white, now);
+                            tm.set_scores(scores, now);
                             AppState::MainPage
                         }
                     } else {
@@ -699,32 +1029,76 @@ impl Application for RefBoxApp {
                 trace!("AppState changed to {:?}", self.app_state);
             }
             Message::PenaltyOverview => {
-                self.pen_edit.start_session().unwrap();
+                if let Err(e) = self.pen_edit.start_session() {
+                    warn!("Failed to start penalty edit session: {e}");
+                    self.pen_edit.abort_session();
+                    self.pen_edit.start_session().unwrap();
+                }
                 self.app_state = AppState::PenaltyOverview(BlackWhiteBundle { black: 0, white: 0 });
                 trace!("AppState changed to {:?}", self.app_state);
             }
-            Message::Scroll { which, up } => {
-                if let AppState::PenaltyOverview(ref mut indices) = self.app_state {
-                    let idx = match which {
-                        ScrollOption::Black => &mut indices.black,
-                        ScrollOption::White => &mut indices.white,
-                        ScrollOption::GameParameter => unreachable!(),
-                    };
-                    if up {
-                        *idx = idx.saturating_sub(1);
-                    } else {
-                        *idx = idx.saturating_add(1);
-                    }
-                } else if let AppState::ParameterList(_, ref mut idx) = self.app_state {
-                    debug_assert_eq!(which, ScrollOption::GameParameter);
-                    if up {
-                        *idx = idx.saturating_sub(1);
-                    } else {
-                        *idx = idx.saturating_add(1);
-                    }
-                } else {
-                    unreachable!();
+            Message::WarningOverview => {
+                if let Err(e) = self.warn_edit.start_session() {
+                    warn!("Failed to start warning edit session: {e}");
+                    self.warn_edit.abort_session();
+                    self.warn_edit.start_session().unwrap();
                 }
+                self.app_state = AppState::WarningOverview(BlackWhiteBundle { black: 0, white: 0 });
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+            Message::FoulOverview => {
+                if let Err(e) = self.foul_edit.start_session() {
+                    warn!("Failed to start foul edit session: {e}");
+                    self.foul_edit.abort_session();
+                    self.foul_edit.start_session().unwrap();
+                }
+                self.app_state = AppState::FoulOverview(OptColorBundle {
+                    black: 0,
+                    equal: 0,
+                    white: 0,
+                });
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+            Message::Scroll { which, up } => {
+                match self.app_state {
+                    AppState::PenaltyOverview(ref mut indices)
+                    | AppState::WarningOverview(ref mut indices) => {
+                        let idx = match which {
+                            ScrollOption::Black => &mut indices.black,
+                            ScrollOption::White => &mut indices.white,
+                            ScrollOption::GameParameter | ScrollOption::Equal => unreachable!(),
+                        };
+                        if up {
+                            *idx = idx.saturating_sub(1);
+                        } else {
+                            *idx = idx.saturating_add(1);
+                        }
+                    }
+                    AppState::FoulOverview(ref mut indices) => {
+                        let idx = match which {
+                            ScrollOption::Black => &mut indices.black,
+                            ScrollOption::Equal => &mut indices.equal,
+                            ScrollOption::White => &mut indices.white,
+                            ScrollOption::GameParameter => unreachable!(),
+                        };
+                        if up {
+                            *idx = idx.saturating_sub(1);
+                        } else {
+                            *idx = idx.saturating_add(1);
+                        }
+                    }
+                    AppState::ParameterList(_, ref mut idx) => {
+                        debug_assert_eq!(which, ScrollOption::GameParameter);
+                        if up {
+                            *idx = idx.saturating_sub(1);
+                        } else {
+                            *idx = idx.saturating_add(1);
+                        }
+                    }
+                    _ => {
+                        unreachable!();
+                    }
+                };
                 trace!("AppState changed to {:?}", self.app_state);
             }
             Message::PenaltyOverviewComplete { canceled } => {
@@ -746,10 +1120,65 @@ impl Application for RefBoxApp {
                 } else {
                     self.app_state = AppState::MainPage;
                 }
+                let snapshot = self
+                    .tm
+                    .lock()
+                    .unwrap()
+                    .generate_snapshot(Instant::now())
+                    .unwrap();
+                self.apply_snapshot(snapshot);
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+            Message::WarningOverviewComplete { canceled } => {
+                if canceled {
+                    self.warn_edit.abort_session();
+                    self.app_state = AppState::WarningsSummaryPage;
+                } else if let Err(e) = self.warn_edit.apply_changes(Instant::now()) {
+                    let err_string = format!("An error occurred while applying the changes to the warnings. \
+                    Some of the changes may have been applied. Please retry any remaining changes.\n\n\
+                    Error Message:\n{e}");
+                    error!("{err_string}");
+                    self.warn_edit.abort_session();
+                    self.app_state =
+                        AppState::ConfirmationPage(ConfirmationKind::Error(err_string));
+                } else {
+                    self.app_state = AppState::WarningsSummaryPage;
+                }
+                let snapshot = self
+                    .tm
+                    .lock()
+                    .unwrap()
+                    .generate_snapshot(Instant::now())
+                    .unwrap();
+                self.apply_snapshot(snapshot);
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+            Message::FoulOverviewComplete { canceled } => {
+                if canceled {
+                    self.foul_edit.abort_session();
+                    self.app_state = AppState::WarningsSummaryPage;
+                } else if let Err(e) = self.foul_edit.apply_changes(Instant::now()) {
+                    let err_string = format!("An error occurred while applying the changes to the fouls. \
+                    Some of the changes may have been applied. Please retry any remaining changes.\n\n\
+                    Error Message:\n{e}");
+                    error!("{err_string}");
+                    self.foul_edit.abort_session();
+                    self.app_state =
+                        AppState::ConfirmationPage(ConfirmationKind::Error(err_string));
+                } else {
+                    self.app_state = AppState::WarningsSummaryPage;
+                }
+                let snapshot = self
+                    .tm
+                    .lock()
+                    .unwrap()
+                    .generate_snapshot(Instant::now())
+                    .unwrap();
+                self.apply_snapshot(snapshot);
                 trace!("AppState changed to {:?}", self.app_state);
             }
             Message::ChangeKind(new_kind) => {
-                if let AppState::KeypadPage(KeypadPage::Penalty(_, _, ref mut kind), _) =
+                if let AppState::KeypadPage(KeypadPage::Penalty(_, _, ref mut kind, _), _) =
                     self.app_state
                 {
                     *kind = new_kind;
@@ -758,16 +1187,38 @@ impl Application for RefBoxApp {
                 }
                 trace!("AppState changed to {:?}", self.app_state);
             }
+            Message::ChangeInfraction(new_infraction) => {
+                match self.app_state {
+                    AppState::KeypadPage(KeypadPage::Penalty(_, _, _, ref mut infraction), _)
+                    | AppState::KeypadPage(
+                        KeypadPage::FoulAdd {
+                            ref mut infraction, ..
+                        },
+                        _,
+                    )
+                    | AppState::KeypadPage(
+                        KeypadPage::WarningAdd {
+                            ref mut infraction, ..
+                        },
+                        _,
+                    ) => {
+                        *infraction = new_infraction;
+                    }
+                    _ => unreachable!(),
+                }
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+
             Message::PenaltyEditComplete { canceled, deleted } => {
                 if !canceled {
                     if let AppState::KeypadPage(
-                        KeypadPage::Penalty(origin, color, kind),
+                        KeypadPage::Penalty(origin, color, kind, infraction),
                         player_num,
                     ) = self.app_state
                     {
                         if deleted {
                             if let Some((old_color, index)) = origin {
-                                self.pen_edit.delete_penalty(old_color, index).unwrap();
+                                self.pen_edit.delete_item(old_color, index).unwrap();
                             } else {
                                 unreachable!();
                             }
@@ -775,10 +1226,14 @@ impl Application for RefBoxApp {
                             let player_num = player_num.try_into().unwrap();
                             if let Some((old_color, index)) = origin {
                                 self.pen_edit
-                                    .edit_penalty(old_color, index, color, player_num, kind)
+                                    .edit_item(
+                                        old_color, index, color, player_num, kind, infraction,
+                                    )
                                     .unwrap();
                             } else {
-                                self.pen_edit.add_penalty(color, player_num, kind).unwrap();
+                                self.pen_edit
+                                    .add_item(color, player_num, kind, infraction)
+                                    .unwrap();
                             }
                         }
                     } else {
@@ -788,16 +1243,149 @@ impl Application for RefBoxApp {
                 self.app_state = AppState::PenaltyOverview(BlackWhiteBundle { black: 0, white: 0 });
                 trace!("AppState changed to {:?}", self.app_state);
             }
+            Message::WarningEditComplete {
+                canceled,
+                deleted,
+                ret_to_overview,
+            } => {
+                if !canceled {
+                    if let AppState::KeypadPage(
+                        KeypadPage::WarningAdd {
+                            origin,
+                            color,
+                            infraction,
+                            team_warning,
+                            ..
+                        },
+                        player_num,
+                    ) = self.app_state
+                    {
+                        let player_num = if team_warning {
+                            None
+                        } else {
+                            Some(player_num.try_into().unwrap())
+                        };
+
+                        if deleted {
+                            if let Some((old_color, index)) = origin {
+                                self.warn_edit.delete_item(old_color, index).unwrap();
+                            } else {
+                                unreachable!();
+                            }
+                        } else if !ret_to_overview {
+                            self.tm
+                                .lock()
+                                .unwrap()
+                                .add_warning(color, player_num, infraction, Instant::now())
+                                .unwrap();
+                        } else if let Some((old_color, index)) = origin {
+                            self.warn_edit
+                                .edit_item(old_color, index, color, player_num, (), infraction)
+                                .unwrap();
+                        } else {
+                            self.warn_edit
+                                .add_item(color, player_num, (), infraction)
+                                .unwrap();
+                        }
+                    } else {
+                        unreachable!();
+                    }
+                }
+                self.app_state = if !ret_to_overview {
+                    AppState::MainPage
+                } else {
+                    AppState::WarningOverview(BlackWhiteBundle { black: 0, white: 0 })
+                };
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+            Message::FoulEditComplete {
+                canceled,
+                deleted,
+                ret_to_overview,
+            } => {
+                if !canceled {
+                    if let AppState::KeypadPage(
+                        KeypadPage::FoulAdd {
+                            origin,
+                            color,
+                            infraction,
+                            ..
+                        },
+                        player_num,
+                    ) = self.app_state
+                    {
+                        let player_num = if color.is_none() {
+                            None
+                        } else {
+                            Some(player_num.try_into().unwrap())
+                        };
+
+                        if deleted {
+                            if let Some((old_color, index)) = origin {
+                                self.foul_edit.delete_item(old_color, index).unwrap();
+                            } else {
+                                unreachable!();
+                            }
+                        } else if !ret_to_overview {
+                            self.tm
+                                .lock()
+                                .unwrap()
+                                .add_foul(color, player_num, infraction, Instant::now())
+                                .unwrap();
+                        } else if let Some((old_color, index)) = origin {
+                            self.foul_edit
+                                .edit_item(old_color, index, color, player_num, (), infraction)
+                                .unwrap();
+                        } else {
+                            self.foul_edit
+                                .add_item(color, player_num, (), infraction)
+                                .unwrap();
+                        }
+                    } else {
+                        unreachable!();
+                    }
+                }
+                self.app_state = if !ret_to_overview {
+                    AppState::MainPage
+                } else {
+                    AppState::FoulOverview(OptColorBundle {
+                        black: 0,
+                        equal: 0,
+                        white: 0,
+                    })
+                };
+                trace!("AppState changed to {:?}", self.app_state);
+            }
             Message::KeypadPage(page) => {
                 let init_val = match page {
-                    KeypadPage::AddScore(_) | KeypadPage::Penalty(None, _, _) => 0,
-                    KeypadPage::Penalty(Some((color, index)), _, _) => {
-                        self.pen_edit
-                            .get_penalty(color, index)
-                            .unwrap()
-                            .player_number as u16
+                    KeypadPage::AddScore(_)
+                    | KeypadPage::Penalty(None, _, _, _)
+                    | KeypadPage::FoulAdd { origin: None, .. }
+                    | KeypadPage::WarningAdd { origin: None, .. } => 0,
+                    KeypadPage::Penalty(Some((color, index)), _, _, _) => {
+                        self.pen_edit.get_item(color, index).unwrap().player_number as u16
                     }
-                    KeypadPage::TeamTimeouts(_) => self.config.game.team_timeouts_per_half,
+                    KeypadPage::WarningAdd {
+                        origin: Some((color, index)),
+                        ..
+                    } => self
+                        .warn_edit
+                        .get_item(color, index)
+                        .unwrap()
+                        .player_number
+                        .map(|n| n.into())
+                        .unwrap_or(0),
+                    KeypadPage::FoulAdd {
+                        origin: Some((color, index)),
+                        ..
+                    } => self
+                        .foul_edit
+                        .get_item(color, index)
+                        .unwrap()
+                        .player_number
+                        .map(|n| n.into())
+                        .unwrap_or(0),
+                    KeypadPage::TeamTimeouts(_, _) => self.config.game.num_team_timeouts_allowed,
                     KeypadPage::GameNumber => self
                         .edited_settings
                         .as_ref()
@@ -835,7 +1423,11 @@ impl Application for RefBoxApp {
             Message::ChangeColor(new_color) => {
                 match self.app_state {
                     AppState::KeypadPage(KeypadPage::AddScore(ref mut color), _)
-                    | AppState::KeypadPage(KeypadPage::Penalty(_, ref mut color, _), _) => {
+                    | AppState::KeypadPage(KeypadPage::Penalty(_, ref mut color, _, _), _)
+                    | AppState::KeypadPage(KeypadPage::WarningAdd { ref mut color, .. }, _) => {
+                        *color = new_color.expect("Invalid color value");
+                    }
+                    AppState::KeypadPage(KeypadPage::FoulAdd { ref mut color, .. }, _) => {
                         *color = new_color;
                     }
                     _ => {
@@ -854,18 +1446,12 @@ impl Application for RefBoxApp {
 
                         let app_state = if tm.current_period() == GamePeriod::SuddenDeath {
                             tm.stop_clock(now).unwrap();
-                            let mut scores = BlackWhiteBundle {
-                                black: tm.get_b_score(),
-                                white: tm.get_w_score(),
-                            };
+                            let mut scores = tm.get_scores();
                             scores[color] = scores[color].saturating_add(1);
 
                             AppState::ConfirmScores(scores)
                         } else {
-                            match color {
-                                GameColor::Black => tm.add_b_score(player.try_into().unwrap(), now),
-                                GameColor::White => tm.add_w_score(player.try_into().unwrap(), now),
-                            };
+                            tm.add_score(color, player.try_into().unwrap(), now);
                             AppState::MainPage
                         };
                         let snapshot = tm.generate_snapshot(now).unwrap();
@@ -882,6 +1468,14 @@ impl Application for RefBoxApp {
                 };
                 trace!("AppState changed to {:?}", self.app_state);
             }
+            Message::ShowGameDetails => {
+                self.app_state = AppState::GameDetailsPage;
+                trace!("AppState changed to {:?}", self.app_state);
+            }
+            Message::ShowWarnings => {
+                self.app_state = AppState::WarningsSummaryPage;
+                trace!("AppState changed to {:?}", self.app_state);
+            }
             Message::EditGameConfig => {
                 let edited_settings = EditableSettings {
                     config: self.tm.lock().unwrap().config().clone(),
@@ -892,10 +1486,17 @@ impl Application for RefBoxApp {
                     },
                     white_on_right: self.config.hardware.white_on_right,
                     using_uwhscores: self.using_uwhscores,
+                    uwhscores_email: self.config.uwhscores.email.clone(),
+                    uwhscores_password: self.config.uwhscores.password.clone(),
+                    uwhportal_token: self.config.uwhportal.token.clone(),
                     current_tid: self.current_tid,
                     current_pool: self.current_pool.clone(),
                     games: self.games.clone(),
                     sound: self.config.sound.clone(),
+                    mode: self.config.mode,
+                    hide_time: self.config.hide_time,
+                    collect_scorer_cap_num: self.config.collect_scorer_cap_num,
+                    track_fouls_and_warnings: self.config.track_fouls_and_warnings,
                 };
 
                 self.edited_settings = Some(edited_settings);
@@ -982,14 +1583,8 @@ impl Application for RefBoxApp {
                                 tm.clear_scheduled_game_start();
                             }
 
-                            let edited_settings = self.edited_settings.take().unwrap();
-                            self.config.hardware.white_on_right = edited_settings.white_on_right;
-                            self.using_uwhscores = edited_settings.using_uwhscores;
-                            self.current_tid = edited_settings.current_tid;
-                            self.current_pool = edited_settings.current_pool;
-                            self.games = edited_settings.games;
-                            self.config.sound = edited_settings.sound;
-                            self.sound.update_settings(self.config.sound.clone());
+                            drop(tm);
+                            self.apply_settings_change();
 
                             confy::store(APP_NAME, None, &self.config).unwrap();
                             AppState::MainPage
@@ -998,17 +1593,6 @@ impl Application for RefBoxApp {
                         if tm.current_period() != GamePeriod::BetweenGames {
                             AppState::ConfirmationPage(ConfirmationKind::GameNumberChanged)
                         } else {
-                            let edited_settings = self.edited_settings.take().unwrap();
-                            self.config.hardware.white_on_right = edited_settings.white_on_right;
-                            self.using_uwhscores = edited_settings.using_uwhscores;
-                            self.current_tid = edited_settings.current_tid;
-                            self.current_pool = edited_settings.current_pool;
-                            self.games = edited_settings.games;
-                            self.config.sound = edited_settings.sound;
-                            self.sound.update_settings(self.config.sound.clone());
-
-                            confy::store(APP_NAME, None, &self.config).unwrap();
-
                             let next_game_info = if edited_settings.using_uwhscores {
                                 NextGameInfo {
                                     number: edited_settings.game_number,
@@ -1036,17 +1620,16 @@ impl Application for RefBoxApp {
                                 tm.apply_next_game_start(Instant::now()).unwrap();
                             }
 
+                            drop(tm);
+                            self.apply_settings_change();
+
+                            confy::store(APP_NAME, None, &self.config).unwrap();
+
                             AppState::MainPage
                         }
                     } else {
-                        let edited_settings = self.edited_settings.take().unwrap();
-                        self.config.hardware.white_on_right = edited_settings.white_on_right;
-                        self.using_uwhscores = edited_settings.using_uwhscores;
-                        self.current_tid = edited_settings.current_tid;
-                        self.current_pool = edited_settings.current_pool;
-                        self.games = edited_settings.games;
-                        self.config.sound = edited_settings.sound;
-                        self.sound.update_settings(self.config.sound.clone());
+                        drop(tm);
+                        self.apply_settings_change();
 
                         confy::store(APP_NAME, None, &self.config).unwrap();
                         AppState::MainPage
@@ -1148,9 +1731,10 @@ impl Application for RefBoxApp {
                         AppState::KeypadPage(KeypadPage::GameNumber, num) => {
                             edited_settings.game_number = num.into();
                         }
-                        AppState::KeypadPage(KeypadPage::TeamTimeouts(len), num) => {
+                        AppState::KeypadPage(KeypadPage::TeamTimeouts(len, per_half), num) => {
                             edited_settings.config.team_timeout_duration = len;
-                            edited_settings.config.team_timeouts_per_half = num;
+                            edited_settings.config.num_team_timeouts_allowed = num;
+                            edited_settings.config.timeouts_counted_per_half = per_half;
                         }
                         _ => unreachable!(),
                     }
@@ -1159,7 +1743,9 @@ impl Application for RefBoxApp {
                 let next_page = match self.app_state {
                     AppState::ParameterEditor(_, _) => ConfigPage::Tournament,
                     AppState::KeypadPage(KeypadPage::GameNumber, _) => ConfigPage::Main,
-                    AppState::KeypadPage(KeypadPage::TeamTimeouts(_), _) => ConfigPage::Tournament,
+                    AppState::KeypadPage(KeypadPage::TeamTimeouts(_, _), _) => {
+                        ConfigPage::Tournament
+                    }
                     AppState::ParameterList(param, _) => match param {
                         ListableParameter::Game => ConfigPage::Main,
                         ListableParameter::Tournament | ListableParameter::Pool => {
@@ -1206,38 +1792,106 @@ impl Application for RefBoxApp {
                 self.app_state = AppState::EditGameConfig(next_page);
                 trace!("AppState changed to {:?}", self.app_state);
             }
-            Message::ToggleBoolParameter(param) => {
-                let edited_settings = self.edited_settings.as_mut().unwrap();
+            Message::ToggleBoolParameter(param) => match param {
+                BoolGameParameter::TeamWarning => {
+                    if let AppState::KeypadPage(
+                        KeypadPage::WarningAdd {
+                            ref mut team_warning,
+                            ..
+                        },
+                        _,
+                    ) = self.app_state
+                    {
+                        *team_warning ^= true
+                    } else {
+                        unreachable!()
+                    }
+                    trace!("AppState changed to {:?}", self.app_state)
+                }
+
+                BoolGameParameter::TimeoutsCountedPerHalf => {
+                    if let AppState::KeypadPage(KeypadPage::TeamTimeouts(_, ref mut per_half), _) =
+                        self.app_state
+                    {
+                        *per_half ^= true
+                    } else {
+                        unreachable!()
+                    }
+                    trace!("AppState changed to {:?}", self.app_state)
+                }
+
+                _ => {
+                    let edited_settings = self.edited_settings.as_mut().unwrap();
+                    match param {
+                        BoolGameParameter::OvertimeAllowed => {
+                            edited_settings.config.overtime_allowed ^= true
+                        }
+                        BoolGameParameter::SuddenDeathAllowed => {
+                            edited_settings.config.sudden_death_allowed ^= true
+                        }
+                        BoolGameParameter::WhiteOnRight => edited_settings.white_on_right ^= true,
+                        BoolGameParameter::UsingUwhScores => {
+                            edited_settings.using_uwhscores ^= true
+                        }
+                        BoolGameParameter::SoundEnabled => {
+                            edited_settings.sound.sound_enabled ^= true
+                        }
+                        BoolGameParameter::RefAlertEnabled => {
+                            edited_settings.sound.whistle_enabled ^= true
+                        }
+                        BoolGameParameter::AutoSoundStartPlay => {
+                            edited_settings.sound.auto_sound_start_play ^= true
+                        }
+                        BoolGameParameter::AutoSoundStopPlay => {
+                            edited_settings.sound.auto_sound_stop_play ^= true
+                        }
+                        BoolGameParameter::HideTime => edited_settings.hide_time ^= true,
+                        BoolGameParameter::ScorerCapNum => {
+                            edited_settings.collect_scorer_cap_num ^= true
+                        }
+                        BoolGameParameter::FoulsAndWarnings => {
+                            edited_settings.track_fouls_and_warnings ^= true
+                        }
+                        BoolGameParameter::TeamWarning
+                        | BoolGameParameter::TimeoutsCountedPerHalf => {
+                            unreachable!()
+                        }
+                    }
+                }
+            },
+            Message::CycleParameter(param) => {
+                let settings = &mut self.edited_settings.as_mut().unwrap();
                 match param {
-                    BoolGameParameter::OvertimeAllowed => {
-                        edited_settings.config.overtime_allowed ^= true
+                    CyclingParameter::BuzzerSound => settings.sound.buzzer_sound.cycle(),
+                    CyclingParameter::RemoteBuzzerSound(idx) => {
+                        settings.sound.remotes[idx].sound.cycle()
                     }
-                    BoolGameParameter::SuddenDeathAllowed => {
-                        edited_settings.config.sudden_death_allowed ^= true
-                    }
-                    BoolGameParameter::WhiteOnRight => edited_settings.white_on_right ^= true,
-                    BoolGameParameter::UsingUwhScores => edited_settings.using_uwhscores ^= true,
-                    BoolGameParameter::SoundEnabled => edited_settings.sound.sound_enabled ^= true,
-                    BoolGameParameter::RefAlertEnabled => {
-                        edited_settings.sound.whistle_enabled ^= true
-                    }
-                    BoolGameParameter::AutoSoundStartPlay => {
-                        edited_settings.sound.auto_sound_start_play ^= true
-                    }
-                    BoolGameParameter::AutoSoundStopPlay => {
-                        edited_settings.sound.auto_sound_stop_play ^= true
-                    }
+                    CyclingParameter::AlertVolume => settings.sound.whistle_vol.cycle(),
+                    CyclingParameter::AboveWaterVol => settings.sound.above_water_vol.cycle(),
+                    CyclingParameter::UnderWaterVol => settings.sound.under_water_vol.cycle(),
+                    CyclingParameter::Mode => settings.mode.cycle(),
                 }
             }
-            Message::CycleParameter(param) => {
-                let sound = &mut self.edited_settings.as_mut().unwrap().sound;
+            Message::TextParameterChanged(param, val) => {
+                let settings = self.edited_settings.as_mut().unwrap();
                 match param {
-                    CyclingParameter::BuzzerSound => sound.buzzer_sound.cycle(),
-                    CyclingParameter::RemoteBuzzerSound(idx) => sound.remotes[idx].sound.cycle(),
-                    CyclingParameter::AlertVolume => sound.whistle_vol.cycle(),
-                    CyclingParameter::AboveWaterVol => sound.above_water_vol.cycle(),
-                    CyclingParameter::UnderWaterVol => sound.under_water_vol.cycle(),
+                    TextParameter::UwhscoresEmail => settings.uwhscores_email = val,
+                    TextParameter::UwhscoresPassword => settings.uwhscores_password = val,
+                    TextParameter::UwhportalToken => settings.uwhportal_token = val,
                 }
+            }
+            Message::ApplyAuthChanges => {
+                let settings = self.edited_settings.as_mut().unwrap();
+                self.config.uwhscores.email = settings.uwhscores_email.clone();
+                self.config.uwhscores.password = settings.uwhscores_password.clone();
+                self.config.uwhportal.token = settings.uwhportal_token.clone();
+
+                self.uwhscores_token.lock().unwrap().take();
+                self.uwhscores_auth_valid_for = None;
+                self.check_uwhscores_auth();
+
+                self.app_state = AppState::EditGameConfig(ConfigPage::Tournament);
+                trace!("AppState changed to {:?}", self.app_state);
             }
             Message::RequestRemoteId => {
                 if let AppState::EditGameConfig(ConfigPage::Remotes(_, ref mut listening)) =
@@ -1290,7 +1944,7 @@ impl Application for RefBoxApp {
                     ConfirmationOption::DiscardChanges => AppState::MainPage,
                     ConfirmationOption::GoBack => AppState::EditGameConfig(ConfigPage::Main),
                     ConfirmationOption::EndGameAndApply => {
-                        let edited_settings = self.edited_settings.take().unwrap();
+                        let edited_settings = self.edited_settings.as_ref().unwrap();
                         let mut tm = self.tm.lock().unwrap();
                         let now = Instant::now();
                         tm.reset_game(now);
@@ -1318,34 +1972,22 @@ impl Application for RefBoxApp {
                             tm.clear_scheduled_game_start();
                         }
 
-                        self.config.hardware.white_on_right = edited_settings.white_on_right;
-                        self.using_uwhscores = edited_settings.using_uwhscores;
-                        self.current_tid = edited_settings.current_tid;
-                        self.current_pool = edited_settings.current_pool;
-                        self.games = edited_settings.games;
-                        self.config.sound = edited_settings.sound;
-                        self.sound.update_settings(self.config.sound.clone());
+                        std::mem::drop(tm);
+                        self.apply_settings_change();
 
                         confy::store(APP_NAME, None, &self.config).unwrap();
-                        let snapshot = tm.generate_snapshot(now).unwrap(); // TODO: Remove this unwrap
-                        std::mem::drop(tm);
+                        let snapshot = self.tm.lock().unwrap().generate_snapshot(now).unwrap(); // TODO: Remove this unwrap
                         self.apply_snapshot(snapshot);
                         AppState::MainPage
                     }
                     ConfirmationOption::KeepGameAndApply => {
-                        let edited_settings = self.edited_settings.take().unwrap();
+                        let edited_settings = self.edited_settings.as_ref().unwrap();
                         let mut tm = self.tm.lock().unwrap();
                         tm.set_game_number(edited_settings.game_number);
                         let snapshot = tm.generate_snapshot(Instant::now()).unwrap();
                         std::mem::drop(tm);
 
-                        self.config.hardware.white_on_right = edited_settings.white_on_right;
-                        self.using_uwhscores = edited_settings.using_uwhscores;
-                        self.current_tid = edited_settings.current_tid;
-                        self.current_pool = edited_settings.current_pool;
-                        self.games = edited_settings.games;
-                        self.config.sound = edited_settings.sound;
-                        self.sound.update_settings(self.config.sound.clone());
+                        self.apply_settings_change();
 
                         confy::store(APP_NAME, None, &self.config).unwrap();
                         self.apply_snapshot(snapshot);
@@ -1379,7 +2021,7 @@ impl Application for RefBoxApp {
                             self.post_game_score(game, scores);
                         }
 
-                        tm.set_scores(scores.black, scores.white, now);
+                        tm.set_scores(scores, now);
                         tm.start_clock(now);
                         tm.update(now + Duration::from_millis(2)).unwrap(); // Need to update after game ends
 
@@ -1396,28 +2038,13 @@ impl Application for RefBoxApp {
 
                 trace!("AppState changed to {:?}", self.app_state);
             }
-            Message::BlackTimeout(switch) => {
+            Message::TeamTimeout(color, switch) => {
                 let mut tm = self.tm.lock().unwrap();
                 let now = Instant::now();
                 if switch {
-                    tm.switch_to_b_timeout().unwrap();
+                    tm.switch_to_team_timeout(color).unwrap();
                 } else {
-                    tm.start_b_timeout(now).unwrap();
-                }
-                if let AppState::TimeEdit(_, _, ref mut time) = self.app_state {
-                    *time = Some(tm.timeout_clock_time(now).unwrap());
-                }
-                let snapshot = tm.generate_snapshot(now).unwrap();
-                std::mem::drop(tm);
-                self.apply_snapshot(snapshot);
-            }
-            Message::WhiteTimeout(switch) => {
-                let mut tm = self.tm.lock().unwrap();
-                let now = Instant::now();
-                if switch {
-                    tm.switch_to_w_timeout().unwrap();
-                } else {
-                    tm.start_w_timeout(now).unwrap();
+                    tm.start_team_timeout(color, now).unwrap();
                 }
                 if let AppState::TimeEdit(_, _, ref mut time) = self.app_state {
                     *time = Some(tm.timeout_clock_time(now).unwrap());
@@ -1430,7 +2057,7 @@ impl Application for RefBoxApp {
                 let mut tm = self.tm.lock().unwrap();
                 let now = Instant::now();
                 if switch {
-                    tm.switch_to_ref_timeout().unwrap();
+                    tm.switch_to_ref_timeout(now).unwrap();
                 } else {
                     tm.start_ref_timeout(now).unwrap();
                 }
@@ -1445,7 +2072,13 @@ impl Application for RefBoxApp {
                 let mut tm = self.tm.lock().unwrap();
                 let now = Instant::now();
                 if switch {
-                    tm.switch_to_penalty_shot().unwrap();
+                    if self.config.mode == Mode::Rugby {
+                        tm.switch_to_rugby_penalty_shot(now).unwrap();
+                    } else {
+                        tm.switch_to_penalty_shot().unwrap();
+                    }
+                } else if self.config.mode == Mode::Rugby {
+                    tm.start_rugby_penalty_shot(now).unwrap();
                 } else {
                     tm.start_penalty_shot(now).unwrap();
                 }
@@ -1458,10 +2091,28 @@ impl Application for RefBoxApp {
             }
             Message::EndTimeout => {
                 let mut tm = self.tm.lock().unwrap();
-                tm.end_timeout(Instant::now()).unwrap();
-                let snapshot = tm.generate_snapshot(Instant::now()).unwrap();
+                let now = Instant::now();
+                let would_end = tm.timeout_end_would_end_game(now).unwrap();
+                if would_end {
+                    tm.halt_clock(now, true).unwrap();
+                } else {
+                    tm.end_timeout(now).unwrap();
+                    tm.update(now).unwrap();
+                }
+                let snapshot = tm.generate_snapshot(now).unwrap();
                 std::mem::drop(tm);
                 self.apply_snapshot(snapshot);
+
+                if would_end {
+                    let scores = BlackWhiteBundle {
+                        black: self.snapshot.b_score,
+                        white: self.snapshot.w_score,
+                    };
+
+                    self.app_state = AppState::ConfirmScores(scores);
+                    trace!("AppState changed to {:?}", self.app_state);
+                }
+
                 if let AppState::TimeEdit(_, _, ref mut timeout) = self.app_state {
                     *timeout = None;
                 }
@@ -1497,6 +2148,15 @@ impl Application for RefBoxApp {
                 }
 
                 if let Some(ref mut tournaments) = self.tournaments {
+                    if let Some(pools) = tournament.pools.as_ref() {
+                        if pools.len() == 1 {
+                            if let Some(ref mut edits) = self.edited_settings {
+                                if edits.current_pool.is_none() {
+                                    edits.current_pool = Some(pools[0].clone());
+                                }
+                            }
+                        }
+                    }
                     tournaments.insert(tournament.tid, tournament);
                 } else {
                     warn!(
@@ -1525,79 +2185,138 @@ impl Application for RefBoxApp {
                     self.games = Some(BTreeMap::from([(game.gid, game)]));
                 }
             }
+            Message::StartClock => self.tm.lock().unwrap().start_clock(Instant::now()),
+            Message::StopClock => self.tm.lock().unwrap().stop_clock(Instant::now()).unwrap(),
+            Message::UwhScoresAuthChecked(valid) => self.uwhscores_auth_valid_for = Some(valid),
             Message::NoAction => {}
         };
 
-        Command::none()
-    }
-
-    fn background_color(&self) -> iced::Color {
-        WINDOW_BACKGROUND
+        command
     }
 
     fn view(&self) -> Element<Message> {
-        let mut main_view = column()
-            .spacing(SPACING)
-            .padding(PADDING)
-            .push(match self.app_state {
-                AppState::MainPage => {
-                    let new_config = if self.snapshot.current_period == GamePeriod::BetweenGames {
-                        self.tm
-                            .lock()
-                            .unwrap()
-                            .next_game_info()
-                            .as_ref()
-                            .and_then(|info| Some(info.timing.as_ref()?.clone().into()))
-                    } else {
-                        None
-                    };
+        let clock_running = self.tm.lock().unwrap().clock_is_running();
+        let mut main_view = column![match self.app_state {
+            AppState::MainPage => {
+                let new_config = if self.snapshot.current_period == GamePeriod::BetweenGames {
+                    self.tm
+                        .lock()
+                        .unwrap()
+                        .next_game_info()
+                        .as_ref()
+                        .and_then(|info| Some(info.timing.as_ref()?.clone().into()))
+                } else {
+                    None
+                };
 
-                    let config = if let Some(ref c) = new_config {
-                        c
-                    } else {
-                        &self.config.game
-                    };
-
-                    build_main_view(&self.snapshot, config, self.using_uwhscores, &self.games)
-                }
-                AppState::TimeEdit(_, time, timeout_time) => {
-                    build_time_edit_view(&self.snapshot, time, timeout_time)
-                }
-                AppState::ScoreEdit {
-                    scores,
-                    is_confirmation,
-                } => build_score_edit_view(&self.snapshot, scores, is_confirmation),
-                AppState::PenaltyOverview(indices) => build_penalty_overview_page(
+                let game_config = if let Some(ref c) = new_config {
+                    c
+                } else {
+                    &self.config.game
+                };
+                build_main_view(
                     &self.snapshot,
-                    self.pen_edit.get_printable_lists(Instant::now()).unwrap(),
-                    indices,
-                ),
-                AppState::KeypadPage(page, player_num) => {
-                    build_keypad_page(&self.snapshot, page, player_num)
-                }
-                AppState::EditGameConfig(page) => build_game_config_edit_page(
-                    &self.snapshot,
-                    self.edited_settings.as_ref().unwrap(),
-                    &self.tournaments,
-                    page,
-                ),
-                AppState::ParameterEditor(param, dur) => {
-                    build_game_parameter_editor(&self.snapshot, param, dur)
-                }
-                AppState::ParameterList(param, index) => build_list_selector_page(
-                    &self.snapshot,
-                    param,
-                    index,
-                    self.edited_settings.as_ref().unwrap(),
-                    &self.tournaments,
-                ),
-                AppState::ConfirmationPage(ref kind) => {
-                    build_confirmation_page(&self.snapshot, kind)
-                }
-                AppState::ConfirmScores(scores) => {
-                    build_score_confirmation_page(&self.snapshot, scores)
-                }
-            });
+                    game_config,
+                    self.using_uwhscores,
+                    &self.games,
+                    &self.config,
+                    clock_running,
+                )
+            }
+            AppState::TimeEdit(_, time, timeout_time) => build_time_edit_view(
+                &self.snapshot,
+                time,
+                timeout_time,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::ScoreEdit {
+                scores,
+                is_confirmation,
+            } => build_score_edit_view(
+                &self.snapshot,
+                scores,
+                is_confirmation,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::PenaltyOverview(indices) => build_penalty_overview_page(
+                &self.snapshot,
+                self.pen_edit.get_printable_lists(Instant::now()).unwrap(),
+                indices,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::WarningOverview(indices) => build_warning_overview_page(
+                &self.snapshot,
+                self.warn_edit.get_printable_lists(Instant::now()).unwrap(),
+                indices,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::FoulOverview(indices) => build_foul_overview_page(
+                &self.snapshot,
+                self.foul_edit.get_printable_lists(Instant::now()).unwrap(),
+                indices,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::KeypadPage(page, player_num) => build_keypad_page(
+                &self.snapshot,
+                page,
+                player_num,
+                &self.config,
+                clock_running,
+            ),
+            AppState::GameDetailsPage => build_game_info_page(
+                &self.snapshot,
+                &self.config.game,
+                self.using_uwhscores,
+                &self.games,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::WarningsSummaryPage =>
+                build_warnings_summary_page(&self.snapshot, self.config.mode, clock_running,),
+            AppState::EditGameConfig(page) => build_game_config_edit_page(
+                &self.snapshot,
+                self.edited_settings.as_ref().unwrap(),
+                &self.tournaments,
+                page,
+                self.config.mode,
+                clock_running,
+                &self.uwhscores_auth_valid_for,
+                self.uwhportal_client.as_ref().map(|c| c.token_validity()),
+                self.touchscreen,
+            ),
+            AppState::ParameterEditor(param, dur) => build_game_parameter_editor(
+                &self.snapshot,
+                param,
+                dur,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::ParameterList(param, index) => build_list_selector_page(
+                &self.snapshot,
+                param,
+                index,
+                self.edited_settings.as_ref().unwrap(),
+                &self.tournaments,
+                self.config.mode,
+                clock_running,
+            ),
+            AppState::ConfirmationPage(ref kind) => {
+                build_confirmation_page(&self.snapshot, kind, self.config.mode, clock_running)
+            }
+            AppState::ConfirmScores(scores) => build_score_confirmation_page(
+                &self.snapshot,
+                scores,
+                self.config.mode,
+                clock_running,
+            ),
+        }]
+        .spacing(SPACING)
+        .padding(PADDING);
 
         match self.app_state {
             AppState::ScoreEdit {
@@ -1605,7 +2324,11 @@ impl Application for RefBoxApp {
             } if is_confirmation => {}
             AppState::ConfirmScores(_) => {}
             _ => {
-                main_view = main_view.push(build_timeout_ribbon(&self.snapshot, &self.tm));
+                main_view = main_view.push(build_timeout_ribbon(
+                    &self.snapshot,
+                    &self.tm,
+                    self.config.mode,
+                ));
             }
         }
 
@@ -1619,16 +2342,16 @@ struct TimeUpdater {
     clock_running_receiver: watch::Receiver<bool>,
 }
 
-impl<H: Hasher, I> Recipe<H, I> for TimeUpdater {
+impl Recipe for TimeUpdater {
     type Output = Message;
 
-    fn hash(&self, state: &mut H) {
+    fn hash(&self, state: &mut iced_core::Hasher) {
         use std::hash::Hash;
 
         "TimeUpdater".hash(state);
     }
 
-    fn stream(self: Box<Self>, _input: BoxStream<'static, I>) -> BoxStream<'static, Self::Output> {
+    fn stream(self: Box<Self>, _input: EventStream) -> BoxStream<'static, Self::Output> {
         debug!("Updater started");
 
         struct State {
@@ -1682,7 +2405,7 @@ impl<H: Hasher, I> Recipe<H, I> for TimeUpdater {
             let now = Instant::now();
 
             let msg_type = if tm.would_end_game(now).unwrap() {
-                tm.halt_clock(now).unwrap();
+                tm.halt_clock(now, false).unwrap();
                 clock_running = false;
                 Message::ConfirmScores
             } else {
@@ -1716,16 +2439,16 @@ struct MessageListener {
     rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Message>>>>,
 }
 
-impl<H: Hasher, I> Recipe<H, I> for MessageListener {
+impl Recipe for MessageListener {
     type Output = Message;
 
-    fn hash(&self, state: &mut H) {
+    fn hash(&self, state: &mut iced_core::Hasher) {
         use std::hash::Hash;
 
         "MessageListener".hash(state);
     }
 
-    fn stream(self: Box<Self>, _input: BoxStream<'static, I>) -> BoxStream<'static, Self::Output> {
+    fn stream(self: Box<Self>, _input: EventStream) -> BoxStream<'static, Self::Output> {
         info!("Message Listener started");
 
         let rx = self

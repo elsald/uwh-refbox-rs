@@ -1,0 +1,124 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  merge_group:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: Swatinem/rust-cache@v2.7.0
+    - name: Versions
+      run: cargo --version && rustc --version && cargo fmt -- --version && cargo clippy -- --version
+    - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: libssl-dev pkg-config libasound2-dev
+        version: latest
+    - uses: Swatinem/rust-cache@v2.7.0
+    - name: Versions
+      run: cargo --version && rustc --version && cargo fmt -- --version && cargo clippy -- --version
+    - run: cargo clippy --all -- --deny=warnings
+    - run: cargo clippy --all --no-default-features -- --deny=warnings
+
+  audit:
+    name: Cargo audit
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions-rust-lang/audit@v1
+      with:
+        file: Cargo.lock
+        ignore: RUSTSEC-2024-0384,RUSTSEC-2024-0388
+
+  build:
+    name: Test debug on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+
+    steps:
+    - uses: actions/checkout@v3
+    - if: ${{ matrix.os == 'ubuntu-latest' }}
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: libssl-dev pkg-config libasound2-dev
+        version: latest
+    - uses: Swatinem/rust-cache@v2.7.0
+    - name: Versions
+      run: cargo --version && rustc --version && cargo fmt -- --version && cargo clippy -- --version
+    - run: cargo build --all
+    - run: cargo test --all
+
+  build-ndf:
+    name: Test debug without default features
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: libssl-dev pkg-config libasound2-dev
+        version: latest
+    - uses: Swatinem/rust-cache@v2.7.0
+    - name: Versions
+      run: cargo --version && rustc --version && cargo fmt -- --version && cargo clippy -- --version
+    - run: cargo build --all --no-default-features
+    - run: cargo test --all --no-default-features
+
+  build-release:
+    name: Test release on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+
+    steps:
+    - uses: actions/checkout@v3
+    - if: ${{ matrix.os == 'ubuntu-latest' }}
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: libssl-dev pkg-config libasound2-dev
+        version: latest
+    - uses: Swatinem/rust-cache@v2.7.0
+    - name: Versions
+      run: cargo --version && rustc --version && cargo fmt -- --version && cargo clippy -- --version
+    - run: cargo build --release --all
+    - run: cargo test --release --all
+
+  build-release-ndf:
+    name: Test release without default features
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: libssl-dev pkg-config libasound2-dev
+        version: latest
+    - uses: Swatinem/rust-cache@v2.7.0
+    - name: Versions
+      run: cargo --version && rustc --version && cargo fmt -- --version && cargo clippy -- --version
+    - run: cargo build --release --all --no-default-features
+    - run: cargo test --release --all --no-default-features
+            
